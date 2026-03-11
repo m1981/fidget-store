@@ -1,208 +1,563 @@
+# Fidget Fun! — Use Cases
+**Methodology:** Alistair Cockburn's *Writing Effective Use Cases* (Breadth-First, Fully Dressed)
+**Last Updated:** 2026-03-11
 
-### 1. Actors (Who interacts with the system)
-For a minimal setup, we only need three primary actors:
-1.  **Customer (Guest):** We will skip mandatory account creation to reduce friction. Customers buy as guests using their phone number and email.
-2.  **Store Owner (Admin):** You, managing the hustle from your smartphone.
-3.  **External Systems:** 
-    *   Payment Gateway (e.g., PayU, Przelewy24, Tpay) for BLIK.
-    *   Logistics API (InPost Paczkomaty) - *Crucial for Poland.*
-
----
-
-### 2. Minimal Feature Set (The "Must-Haves")
-
-#### A. Customer-Facing (Mobile Storefront)
-*   **Product Feed (Homepage):** A simple, Instagram-style vertical scrolling feed of products with high-quality images, price, and an "Add to Cart" button.
-*   **Product Details Modal:** A pop-up or slide-over screen with a short description, stock availability, and a larger image.
-*   **Floating Cart:** A persistent cart icon showing the number of items and total price.
-*   **Frictionless Checkout (One-Page):**
-    *   Contact info (Email, Phone number).
-    *   Delivery selection (Local Pickup / InPost Paczkomat map widget).
-    *   Payment selection (BLIK as the default/primary option).
-*   **Order Confirmation Page:** Displays the order number and a summary.
-
-#### B. Admin-Facing (Mobile Dashboard)
-*   **Simple Order Management:** A list of orders with statuses (New, Paid, Sent, Completed).
-*   **Basic Product Management:** Ability to take a photo with your phone, add a title, price, and stock quantity, and publish it instantly.
-*   **Push Notifications:** Instant alert on your phone when a new order is placed and paid.
+> **Hub-and-Spoke Note:** These use cases describe *behavior only* (Chapter 3 of requirements).
+> UI design → `docs/mockups/`. Data field definitions → `docs/data-model.md` (TBD).
+> Complex business rules are referenced inline but defined in `docs/00-spec-overview.md`.
 
 ---
 
-### 3. Core Use Cases (User Flows)
+## Part 1: System Context
 
-#### Use Case 1: The Customer Purchase Flow (BLIK Focus)
-1.  **Trigger:** Customer opens the store link via social media (Instagram/TikTok/Facebook local group).
-2.  **Action:** Customer scrolls the feed and taps "Add to Cart" on an item.
-3.  **Action:** Customer taps the Cart icon and proceeds to Checkout.
-4.  **Action:** Customer enters their phone number and email.
-5.  **Action:** Customer selects "InPost Paczkomat" and chooses their local locker from the mobile map.
-6.  **Action:** Customer selects **BLIK**.
-7.  **System:** Prompts for the 6-digit BLIK code (or uses BLIK One-Click if they are a returning customer who saved the store in their banking app).
-8.  **Action:** Customer enters the code and confirms in their banking app.
-9.  **System:** Payment gateway confirms payment instantly. System shows the "Thank You" screen and sends an SMS/Email receipt.
+### 1.1 System Scope
 
-#### Use Case 2: Store Owner Order Fulfillment
-1.  **Trigger:** Admin receives a push notification: *"New Order #102 paid via BLIK."*
-2.  **Action:** Admin opens the mobile dashboard and views order details (Items, Paczkomat ID).
-3.  **Action:** Admin packs the item.
-4.  **Action:** Admin taps "Generate InPost Label" (integration automatically creates the shipping label).
-5.  **Action:** Admin changes order status to "Sent."
-6.  **System:** Sends an automated SMS/Email to the Customer with the InPost tracking link.
+**System Name:** Fidget Fun! PWA
 
-#### Use Case 3: Adding a New Product
-1.  **Trigger:** Admin has a new batch of local products.
-2.  **Action:** Admin opens the mobile dashboard and taps "Add Product."
-3.  **Action:** Admin uses the phone camera to snap a picture.
-4.  **Action:** Admin types the name, sets the price (PLN), and sets inventory count (e.g., 5 items).
-5.  **Action:** Admin taps "Publish."
-6.  **System:** Product instantly appears on the mobile storefront feed.
+| Topic | In Scope | Notes |
+|---|---|---|
+| Customer storefront (browsing, cart, checkout) | ✅ In | |
+| BLIK payment via aggregator | ✅ In | PayU / Przelewy24 |
+| InPost Paczkomat locker selection & label generation | ✅ In | |
+| Factory Switch (pause/resume store) | ✅ In | |
+| Weekly Drop management | ✅ In | Admin-only |
+| Order fulfillment (label, status updates) | ✅ In | Admin-only |
+| Aggregated print batch view | ✅ In | Makers (Leo & Sam) |
+| Order status tracking | ✅ In | Guest-accessible |
+| Mandatory customer accounts | ❌ Out | Guest checkout only |
+| BLIK Pre-authorization (capture on label) | ❌ Out | Post-MVP |
+| Loyalty / referral system | ❌ Out | Post-MVP |
+| Multi-currency / non-PLN | ❌ Out | PLN only |
+| Strikethrough / promotional pricing | ❌ Out | Omnibus law compliance |
+| Third-party shipping couriers | ❌ Out | InPost only for MVP |
 
 ---
 
-### 4. Technical & Market Specifics for Poland (2026)
+### 1.2 Domain Glossary (Ubiquitous Language)
 
-*   **Payment Gateway:** You don't need to integrate BLIK directly. Use an aggregator like **Przelewy24, PayU, or Autopay**. They offer out-of-the-box mobile-optimized BLIK widgets. In 2026, ensure the gateway supports *BLIK Zbliżeniowy* (Contactless) or *BLIK One-Click* for returning customers.
-*   **Delivery:** **InPost Paczkomaty** is non-negotiable in Poland. You must include the mobile-friendly InPost Geowidget so users can select their locker. For a local hustle, also add a free "Odbiór osobisty" (Local Pickup) option.
-*   **Legal (Omnibus Directive):** Even for a small hustle, Polish law requires you to show the lowest price from the last 30 days if you run a promotion. Keep it simple: don't run "fake" sales in the MVP to avoid building this complex feature. Just use flat pricing.
-*   **Tech Stack Recommendation:** Since it's mobile-only, a **PWA (Progressive Web App)** built on a headless framework (like Next.js/React) connected to a lightweight backend (like Supabase or a simplified Shopify/WooCommerce headless setup) is ideal. It feels like a native app but requires no App Store approval.
-
-----
-
-This is a brilliant business concept. The "Fidget Fun!" idea perfectly taps into the 2026 social commerce trends in Poland (TikTok/Instagram Reels driving traffic) and leverages the "Underdog/Maker" psychology. 
-
-Because you are selling **capacity and reservations** rather than off-the-shelf inventory, the standard e-commerce model needs to be tweaked. We are moving from a traditional "Store" to a **"Drop & Batch Production"** platform.
-
-Here is how we adapt the system requirements to support your specific story, including the "Factory Pause" feature and new use cases tailored to the boys' workflow.
-
----
-
-### 1. Expanded Actors
-We need to split the Admin role to support the family dynamic:
-1.  **Customer (Guest):** The community member buying the story and the product.
-2.  **Admin (The Uncle):** Manages the business side (Payments, InPost labels, refunds, turning the store on/off).
-3.  **The Makers (The Boys):** Need a simplified, read-only mobile view that answers one question: *"What do we need to print today?"*
+| Term | Definition |
+|---|---|
+| **Drop** | A time-bounded weekly production window. Orders may only be placed while the Drop is active. |
+| **Print Slot** | The atomic unit of factory capacity. Each order item consumes exactly 1 Print Slot. |
+| **Factory Switch** | The Admin's master toggle. When OFF, no new reservations are accepted. |
+| **Reservation** | A confirmed, paid order for a future-printed item (not an off-the-shelf purchase). |
+| **Variant** | A specific combination of product model + filament color (e.g., "Crystal Dragon / Silk Blue"). |
+| **Mystery Box** | A special variant with no color or model selection; fulfills using leftover filament. |
+| **Print Batch** | The production view aggregated by filament color across all orders in a Drop. |
+| **Paczkomat** | An InPost automated parcel locker. The only supported delivery method (MVP). |
+| **BLIK Code** | A 6-digit, 2-minute single-use payment code generated by the customer's banking app. |
+| **Maker** | Leo or Sam — the production role responsible for 3D printing items. |
+| **Uncle Mike** | The Admin role — business operations, logistics, payments. |
 
 ---
 
-### 2. New & Refined Core Features (The "Fidget Fun" MVP)
+### 1.3 Actors & Stakeholders
 
-*   **The "Factory Switch" (Pause/Vacation Mode):** A master toggle in the Admin panel. When flipped, it disables the checkout, changes "Reserve" buttons to "Out of Stock," and displays a customizable banner (e.g., *"Printer is cooling down! Back on Monday"* or *"Boys are on a school trip!"*).
-*   **The "Drop" Countdown Timer:** A prominent, sticky timer on the mobile homepage counting down to the end of the current reservation window (e.g., *"Batch #4 closes in 2 days, 14 hours"*).
-*   **Batched Production View:** A specific screen for the boys that aggregates orders not by customer, but by **Color and Model** to optimize the 3D printer build plate.
-*   **Mystery Box Logic:** A product type that bypasses color/model selection, allowing you to use up leftover filament.
+**Primary Actors** (initiate use cases):
 
----
+| Actor | Description |
+|---|---|
+| **Customer (Guest)** | Community member purchasing via mobile. No account required. |
+| **Admin (Uncle Mike)** | Manages business operations: store state, drops, fulfillment, refunds. |
+| **Makers (Leo & Sam)** | Read-only production role. See what to print, mark jobs complete. |
 
-### 3. Discovered Supporting Use Cases
+**External Systems** (respond to requests):
 
-Here are the new use cases that bring your specific business model to life:
+| System | Role |
+|---|---|
+| **Payment Gateway** (PayU/Przelewy24) | Processes BLIK payments; provides transaction status callbacks. |
+| **InPost API** | Provides Geowidget for locker selection; generates shipping labels. |
 
-#### Use Case 4: Pausing the Home Factory (Outage/Holiday)
-1.  **Trigger:** The 3D printer nozzle jams, or the family is going on a one-week holiday.
-2.  **Action:** Admin (Uncle) opens the mobile dashboard and toggles "Factory Status" to OFF.
-3.  **Action:** Admin types a short status message: *"Printer maintenance! Next drop delayed by 3 days."*
-4.  **System:** Instantly updates the storefront. The countdown timer is replaced by the message. All "Reserve via BLIK" buttons are greyed out.
-5.  **Action:** When ready, Admin toggles the switch back to ON, and the system resumes taking reservations.
+**Off-Stage Stakeholders** (don't touch the system but have interests):
 
-#### Use Case 5: The Weekly Drop & FOMO Purchase
-1.  **Trigger:** Customer clicks a link from a TikTok video showing the boys designing a new "Articulated Dragon."
-2.  **System:** Customer lands on the mobile site. A banner reads: *"Batch #12: Only 30 Print Slots Available. Closes Sunday!"*
-3.  **Action:** Customer selects the Dragon, chooses a color (e.g., "Silk Blue"), and taps **"Reserve My Spot"** (instead of "Add to Cart").
-4.  **System:** Checks if the global capacity limit (e.g., 30 items per week) is reached. If not, proceeds to checkout.
-5.  **Action:** Customer pays instantly via **BLIK**.
-6.  **System:** Sends confirmation: *"You're in! The boys will start printing your Dragon on Monday. Expected InPost delivery: Thursday."*
-
-#### Use Case 6: Generating the "Print Batch" (For the Makers)
-1.  **Trigger:** The weekly reservation window closes on Sunday night.
-2.  **Action:** The Makers (The Boys) open their specific mobile view on Monday morning.
-3.  **System:** Instead of showing individual customer orders, the system aggregates the data and displays a "Print List":
-    *   *Filament: Silk Blue -> 5x Dragons, 2x Spinners.*
-    *   *Filament: Matte Black -> 10x Hex Puzzles.*
-4.  **Action:** The boys load the Silk Blue filament, slice the files, and start the printer.
-5.  **Action:** As items finish, the boys tap a checkbox next to the item on their phone.
-6.  **System:** Once all items for a specific customer are checked off, the system alerts the Uncle: *"Order #105 is printed and ready for packing."*
-
-#### Use Case 7: The "Filament Saver" Mystery Box
-1.  **Trigger:** Customer wants to support the boys but doesn't know what to choose, or wants a surprise.
-2.  **Action:** Customer selects "Mystery Box" on the storefront. There are no color or model options to choose from.
-3.  **Action:** Customer pays via BLIK.
-4.  **System:** Adds the Mystery Box to the Uncle's order list.
-5.  **Value:** When the boys have half a spool of random filament left over from the main batch, they print a random item to fulfill this order, ensuring zero waste and maximum printer efficiency.
+| Stakeholder | Interest |
+|---|---|
+| **Parents** | Ensure the boys' homework/study commitments are respected via Factory Switch. |
+| **Polish tax authority** | Omnibus Directive compliance — no fake promotions, accurate PLN pricing. |
+| **Future customers** | Trust established by transparent capacity and honest status messaging. |
 
 ---
 
-### 4. E-Commerce Engineering Advice for this Model
+### 1.4 Actor-Goal List (Functional Scope)
 
-*   **Inventory Management:** Do not track inventory by *finished product*. Track inventory by **Printer Capacity Slots**. If your printer can make 40 items a week, your total store inventory is 40. Every time someone buys a Dragon or a Spinner, the global capacity drops by 1.
-*   **Communication is Key:** Because customers are waiting for production, the system should ideally send one intermediate SMS/Email between Payment and Shipping. E.g., *"Update from the garage: Your item is currently on the printer!"* This reinforces the story and reduces "Where is my order?" messages.
-*   **BLIK Pre-Auth (Optional for later):** For the MVP, take the BLIK payment immediately upon reservation. In the future (post-2026), you could use BLIK Pre-authorization, where the funds are locked but only captured when the Uncle generates the InPost label.
+Goals are at **Sea Level (🌊 User Goal)** unless noted. Checked against the test: *"Can it be done in one sitting? Does the user go away satisfied?"*
 
-This setup keeps the technology minimal but perfectly aligns the software with the psychology of your brand. Shall we define the exact data fields needed for the "Print Batch" aggregation?
+| ID | Actor | Goal | Level |
+|---|---|---|---|
+| UC-01 | Customer | Reserve a Drop product via BLIK | 🌊 |
+| UC-02 | Customer | Purchase Mystery Box | 🌊 |
+| UC-03 | Customer | Track order status | 🌊 |
+| UC-04 | Admin | Toggle Factory Switch (pause / resume) | 🌊 |
+| UC-05 | Admin | Manage a Weekly Drop (create / edit capacity & timing) | 🌊 |
+| UC-06 | Admin | Fulfill an order (generate InPost label, mark shipped) | 🌊 |
+| UC-07 | Admin | Issue a refund | 🌊 |
+| UC-08 | Makers | View aggregated Print Batch for active Drop | 🌊 |
+| UC-09 | Makers | Mark a print job as complete | 🌊 |
 
-
-----
-
-
-### 1. Feature Extraction from Mockups
-
-Here are the specific features located in the designs that we must include in the engineering requirements:
-
-**A. Homepage / Storefront (Image 1)**
-*   **Dynamic Printer Status Widget:** A prominent UI block showing current operational status (e.g., "OPEN! The nozzle is cool and ready") and dynamic estimated shipping times (e.g., "2-3 Days"). This is the customer-facing side of the "Factory Switch."
-*   **Scarcity Badges:** Overlays on product cards showing real-time capacity (e.g., "Only 8 left!" or "Batch 1 of 3").
-*   **Horizontal Product Carousel:** For "This Week's Fresh Prints."
-*   **Dedicated Mystery Box Block:** A distinct UI section with its own CTA ("Surprise Me!") separate from the standard product carousel.
-*   **Trust/Story Section:** A static block featuring a photo of the founders and the "Homework comes before printing" rule.
-*   **Footer Navigation:** Quick links for "Track My Order," "Contact Uncle Mike," and "Instagram."
-
-**B. Product Detail Page (PDP) (Image 3)**
-*   **Video/Animation Link:** A "See it Move! (Animation)" text link with a play icon, likely opening a lightweight modal or linking to a TikTok/Reel.
-*   **Visual Color Swatches:** Circular UI elements for selecting filament colors (e.g., Rainbow, Silk Blue, Gold) instead of a standard dropdown menu.
-*   **"Print Time & Effort" Widget:** A transparency feature showing the customer how long the item takes to make (e.g., "Approx. 14 hours to print").
-
-**C. Checkout / Payment (Image 2)**
-*   **Order Summary:** Clear breakdown of items and total cost.
-*   **Native BLIK Integration UI:**
-    *   Radio button selection for BLIK.
-    *   6-digit input field formatted with spacing.
-    *   **Active Countdown Timer:** (e.g., "Code expires in 1:45") - *Crucial technical requirement for BLIK API integration.*
-
-*(Localization Note: The mockups show prices in USD ($). As your requirements engineer for Poland 2026, I will specify that the database and frontend must be localized to PLN (zł) for the actual build).*
+*Below sea-level (sub-functions, not standalone use cases):*
+- Admin authenticates (PIN / magic link) — precondition for UC-04..07
+- Makers authenticate (PIN) — precondition for UC-08..09
+- Customer selects InPost locker — sub-step within UC-01, UC-02
+- Customer enters BLIK code — sub-step within UC-01, UC-02
 
 ---
 
-### 2. Updated Use Cases
+## Part 2: Use Case Briefs
 
-Based on the UI, here are the refined core use cases:
+Brief summaries for prioritisation and complexity estimation (Phase 3).
 
-#### Use Case 1: The "Fidget Fun" Purchase Flow (Updated)
-1.  **Trigger:** Customer lands on the mobile homepage.
-2.  **Action:** Customer views the "Printer Status" widget to confirm the shop is taking orders.
-3.  **Action:** Customer taps on the "Crystal Dragon" from the horizontal carousel.
-4.  **System:** Opens the Product Detail Page (PDP).
-5.  **Action:** Customer taps "See it Move!" to watch a quick animation, then selects the "Rainbow" color swatch.
-6.  **System:** Updates the product image (if applicable) and displays the "Print Time & Effort" (14 hours).
-7.  **Action:** Customer taps "Add to Cart".
-8.  **Action:** Customer navigates to Checkout.
-9.  **System:** Displays Order Summary.
-10. **Action:** Customer selects BLIK and enters the 6-digit code from their banking app.
-11. **System:** Starts the 2-minute countdown timer ("Code expires in 1:59").
-12. **Action:** Customer confirms the payment in their banking app before the timer hits 0:00.
-13. **System:** Processes payment, shows success screen, and deducts `1` from the global "Crystal Dragon" capacity limit.
+| ID | Brief |
+|---|---|
+| **UC-01** | A guest customer browses the weekly drop, selects a product variant (model + filament color), proceeds through a one-page checkout supplying contact details and an InPost locker, and pays via BLIK. On confirmed payment, one Print Slot is deducted from the Drop's capacity. This is the primary revenue-generating flow. High complexity due to BLIK countdown timer and atomic capacity deduction. |
+| **UC-02** | A guest customer purchases a Mystery Box with a single "Surprise Me!" action. No variant selection. Otherwise identical to UC-01 from checkout onward. Low complexity. |
+| **UC-03** | A customer enters their order reference or clicks a confirmation link to see the current order status (Paid → Printing → Packed → Shipped → Delivered). Read-only. Low complexity. |
+| **UC-04** | Uncle Mike flips the Factory Switch to PAUSED (with a custom status message) or back to ACTIVE. Instant effect on all customer-facing Add-to-Cart controls. Medium complexity due to real-time propagation. |
+| **UC-05** | Uncle Mike creates or updates a Drop by setting the open/close dates, total Print Slot capacity, and the list of active products. Can update an in-progress Drop without cancelling existing reservations. Medium complexity. |
+| **UC-06** | Uncle Mike views a paid order, generates the InPost shipping label with one action, and marks the order as Shipped. System sends automated tracking notification to the customer. Medium complexity due to InPost API integration. |
+| **UC-07** | Uncle Mike selects an order and initiates a refund through the Payment Gateway. System cancels the order, restores the Print Slot to the Drop's capacity, and notifies the customer. Medium complexity. |
+| **UC-08** | Leo or Sam open their Makers view and see all confirmed orders for the active Drop aggregated by filament color and model (e.g., "Silk Blue: 5× Dragon, 2× Spinner"). Read-only. Low complexity. |
+| **UC-09** | A Maker marks a specific print job (one model + color combination for one customer order) as complete. When all items in an order are complete, Uncle Mike is notified to pack. Low complexity. |
 
-#### Use Case 4: Pausing the Home Factory (Updated to match UI)
-1.  **Trigger:** The boys have heavy homework loads this week.
-2.  **Action:** Admin (Uncle Mike) opens the backend and toggles the Factory Switch to "PAUSED".
-3.  **Action:** Admin updates the status text to: *"Homework week! Next drop on Friday."*
-4.  **System:** The Homepage "Printer Status" widget turns Red/Grey. The text updates to the new message.
-5.  **System:** All "Add to Cart" buttons on PDPs are disabled. The Scarcity Badges change to "Paused".
+---
 
-#### Use Case 7: The "Filament Saver" Mystery Box (Updated to match UI)
-1.  **Trigger:** Customer scrolls past the weekly prints and sees the "Feeling Lucky?" section.
-2.  **Action:** Customer taps "Surprise Me!".
-3.  **System:** Instantly adds the $20 (PLN equivalent) Mystery Box to the cart without requiring color or model selection.
-4.  **Action:** Customer completes BLIK checkout.
-5.  **Value:** The boys use leftover filament at the end of the week to fulfill this, maximizing profit margins on otherwise wasted plastic.
+## Part 3: Fully Dressed Use Cases
 
-### Next Steps for Specification
-The UI is highly polished for an MVP. To build this efficiently, we should specify a **Headless CMS** (like Sanity or Strapi) so Uncle Mike can easily update the "Printer Status" text, swap out the "Weekly Drop" products, and change the Scarcity limits without touching any code. 
+---
+
+### UC-01: Reserve a Drop Product via BLIK
+
+**Primary Actor:** Customer (Guest)
+**Scope:** Fidget Fun! PWA
+**Level:** 🌊 User Goal
+**Trigger:** Customer decides to reserve a specific product variant from the active Weekly Drop.
+
+**Stakeholders & Interests:**
+- **Customer:** Wants to secure a Print Slot before capacity runs out; wants a fast, frictionless mobile checkout.
+- **Admin (Uncle Mike):** Wants only confirmed, paid orders — no speculative cart holds that block real buyers.
+- **Payment Gateway:** Wants BLIK authorization completed within the 2-minute window.
+- **Polish tax authority:** Wants an accurate, immutable order record with PLN total at time of purchase.
+
+**Preconditions:**
+1. Factory Switch is ON.
+2. The active Drop has at least 1 Print Slot remaining for the selected variant.
+3. Customer has a BLIK-enabled banking app on their device.
+
+**Minimal Guarantees:**
+- No Print Slot is reserved unless payment is fully confirmed by the gateway.
+- Every BLIK attempt (success or failure) is logged with timestamp and gateway reference.
+- If the system fails after payment confirmation but before order creation, a compensating job retries order creation using the gateway reference.
+
+**Success Guarantees:**
+- Exactly 1 Print Slot is atomically deducted from the Drop's remaining capacity.
+- An Order record is created with status `PAID`.
+- Customer receives confirmation by email and SMS with order reference and expected print/delivery dates.
+
+---
+
+**Main Success Scenario:**
+
+1. Customer selects a product and **identifies** the desired filament color variant.
+2. Customer **adds** the variant to the cart.
+3. Customer **initiates checkout**, providing email address and mobile phone number.
+4. Customer **designates** an InPost Paczkomat as the delivery point. *(See: InPost Geowidget, `docs/00-spec-overview.md §5`)*
+5. Customer **initiates BLIK payment**.
+6. System **requests** a BLIK transaction from the Payment Gateway and opens a 2-minute authorization window; countdown is visible to the customer.
+7. Customer **authorizes** the transaction in their banking app before the window closes.
+8. System **receives** payment confirmation from the gateway, **atomically deducts** 1 Print Slot, and **creates** the Order.
+9. System **dispatches** a confirmation to the customer (email + SMS) containing the order reference, selected Paczkomat, and estimated production/delivery window.
+
+---
+
+**Extensions:**
+
+- **1a. Selected variant has 0 remaining Print Slots:**
+  - 1a1. System shows "Sold Out" on the variant; Add to Cart is disabled.
+  - 1a2. Use case ends (goal fails — capacity exhausted).
+
+- **2a. Factory Switch is OFF at time of cart add:**
+  - 2a1. System displays the Admin's custom status message (e.g., "Homework week! Back Friday").
+  - 2a2. Add to Cart controls are disabled; use case ends.
+
+- **2b. Factory Switch toggled OFF while customer is mid-checkout:**
+  - 2b1. System detects the switch change before payment initiation.
+  - 2b2. System informs customer that the store is temporarily paused.
+  - 2b3. Cart is preserved; use case suspended until store reopens.
+
+- **5a. Drop capacity reaches 0 between cart add and payment initiation (race condition):**
+  - 5a1. System detects 0 slots remain at payment initiation.
+  - 5a2. System informs customer the last slot was just taken.
+  - 5a3. Use case ends (goal fails).
+
+- **6a. BLIK authorization window expires (2 minutes elapse):**
+  - 6a1. System cancels the payment request with the gateway.
+  - 6a2. System notifies customer the code expired and offers to restart payment.
+  - 6a3. Customer may **retry from step 5** without re-entering contact or locker details.
+
+- **7a. Customer's bank rejects the BLIK authorization:**
+  - 7a1. Gateway returns rejection; no funds captured.
+  - 7a2. System notifies customer of the rejection with a generic message.
+  - 7a3. Customer may **retry from step 5**.
+
+- **8a. Gateway confirmation is delayed / timeout:**
+  - 8a1. System holds the order in `PENDING_PAYMENT` state and polls the gateway for up to 5 minutes.
+  - 8a2. On confirmed payment → continue from step 8.
+  - 8a3. On confirmed failure → no slot deducted; customer notified.
+  - 8a4. On unresolvable timeout → Admin is alerted for manual resolution.
+
+---
+
+### UC-02: Purchase Mystery Box
+
+**Primary Actor:** Customer (Guest)
+**Scope:** Fidget Fun! PWA
+**Level:** 🌊 User Goal
+**Trigger:** Customer selects the "Surprise Me!" option on the Mystery Box section.
+
+**Stakeholders & Interests:**
+- **Customer:** Wants a fast, one-action purchase with no decision fatigue.
+- **Makers:** Want the Mystery Box order so they can efficiently use leftover filament.
+- **Admin:** Same payment and order-record interests as UC-01.
+
+**Preconditions:**
+1. Factory Switch is ON.
+2. Mystery Box has at least 1 Print Slot remaining.
+3. Customer has a BLIK-enabled banking app.
+
+**Minimal Guarantees:** Same as UC-01.
+**Success Guarantees:** Same as UC-01; Order is created with `is_mystery = true`; no filament color or model is assigned at this stage.
+
+---
+
+**Main Success Scenario:**
+
+1. Customer **initiates** the Mystery Box purchase ("Surprise Me!").
+2. System **adds** a Mystery Box item to the cart (no variant selection required).
+3. **[Continues from UC-01, step 3 onward.]**
+
+---
+
+**Extensions:**
+
+- **1a. Mystery Box has 0 remaining Print Slots:**
+  - 1a1. "Surprise Me!" button is disabled with a "Sold Out" state.
+  - 1a2. Use case ends.
+- *All other extensions identical to UC-01.*
+
+---
+
+### UC-03: Track Order Status
+
+**Primary Actor:** Customer (Guest)
+**Scope:** Fidget Fun! PWA
+**Level:** 🌊 User Goal
+**Trigger:** Customer wants to know the current state of their order after purchase.
+
+**Stakeholders & Interests:**
+- **Customer:** Wants reassurance that production is progressing; wants a tracking link when shipped.
+- **Admin:** Wants to reduce "Where is my order?" support messages.
+
+**Preconditions:** Customer has received an order confirmation containing an order reference or link.
+
+**Minimal Guarantees:** System returns only the status of the order identified by the provided reference; no other customer data is exposed.
+
+**Success Guarantees:** Customer sees the current order status and, if shipped, the InPost tracking link.
+
+---
+
+**Main Success Scenario:**
+
+1. Customer **presents** their order reference (via link or manual entry).
+2. System **locates** the order.
+3. System **displays** the current status and a human-readable description:
+   - `PAID` → "Payment confirmed. The boys will start printing soon!"
+   - `PRINTING` → "Your [item] is on the printer. Est. ready: [date]."
+   - `PACKED` → "Packed and ready! Uncle Mike is generating your label."
+   - `SHIPPED` → "On its way! [InPost tracking link]."
+   - `DELIVERED` → "Delivered. Thank you for supporting the hustle!"
+
+---
+
+**Extensions:**
+
+- **2a. Order reference not found:**
+  - 2a1. System reports no order found for that reference.
+  - 2a2. System offers a link to contact Uncle Mike.
+
+---
+
+### UC-04: Toggle Factory Switch
+
+**Primary Actor:** Admin (Uncle Mike)
+**Scope:** Fidget Fun! PWA — Admin Panel
+**Level:** 🌊 User Goal
+**Trigger:** A real-world event requires pausing or resuming production (printer jam, exam week, holiday, drop closed).
+
+**Stakeholders & Interests:**
+- **Admin:** Needs instant effect; wants to communicate the reason to customers.
+- **Customers:** Want to know *why* the store is paused and *when* it will reopen.
+- **Parents:** Trust that the boys' schoolwork is respected; this switch is the enforcement mechanism.
+- **Makers:** No impact on Makers view (read-only; existing print batch remains accessible).
+
+**Preconditions:** Admin is authenticated.
+**Minimal Guarantees:** Switch state is persisted durably; a partial update (state saved but message not) reverts to the last fully saved state.
+**Success Guarantees:** Storefront immediately reflects the new state; all Add-to-Cart and checkout entry-points are enabled or disabled accordingly.
+
+---
+
+**Main Success Scenario (Pausing):**
+
+1. Admin **navigates** to Factory Switch control.
+2. Admin **sets** the switch to PAUSED.
+3. Admin **provides** a status message (e.g., "Homework week! Next drop on Friday.").
+4. Admin **confirms** the change.
+5. System **persists** the new state and **propagates** it to the storefront: Printer Status widget turns to OFF state, all Add-to-Cart controls are disabled, status message is displayed.
+
+---
+
+**Extensions:**
+
+- **3a. Admin saves without a status message:**
+  - 3a1. System uses a default message: "We're taking a short break. Check back soon!"
+
+- **4a. Admin resumes (sets switch to ACTIVE):**
+  - 4a1. System persists ACTIVE state.
+  - 4a2. System re-enables all Add-to-Cart controls.
+  - 4a3. Status message reverts to the standard "OPEN! The nozzle is cool and ready." (or Admin's custom active message).
+
+- **5a. Propagation delayed (e.g., CDN cache):**
+  - 5a1. System guarantees storefront reflects change within 30 seconds.
+
+---
+
+### UC-05: Manage a Weekly Drop
+
+**Primary Actor:** Admin (Uncle Mike)
+**Scope:** Fidget Fun! PWA — Admin Panel
+**Level:** 🌊 User Goal
+**Trigger:** Admin needs to set up the next batch production window or adjust an ongoing one.
+
+**Stakeholders & Interests:**
+- **Admin:** Wants to configure capacity and timing without touching code.
+- **Customers:** Trust that the scarcity numbers displayed are accurate and not manipulated.
+- **Makers:** Need the Drop's product list to match what they will actually print.
+
+**Preconditions:** Admin is authenticated.
+**Minimal Guarantees:** Editing an active Drop (adjusting capacity down) never reduces capacity below the number of already-confirmed orders (no over-cancellation).
+**Success Guarantees:** Drop configuration is saved; storefront capacity badges and drop countdown reflect the new values.
+
+---
+
+**Main Success Scenario:**
+
+1. Admin **creates** a new Drop (or selects an existing one to edit).
+2. Admin **sets** the Drop open and close timestamps.
+3. Admin **sets** the total Print Slot capacity for the Drop window.
+4. Admin **selects** the products active in this Drop and sets per-variant Print Slot limits.
+5. Admin **publishes** the Drop.
+6. System **activates** the Drop at the configured open time; storefront shows the countdown timer and live capacity badges.
+
+---
+
+**Extensions:**
+
+- **3a. Admin reduces capacity on an active Drop:**
+  - 3a1. System validates new capacity ≥ count of already-confirmed orders.
+  - 3a2. If valid: capacity updated; scarcity badges refresh.
+  - 3a3. If invalid: System rejects with "Capacity cannot be reduced below [N] confirmed reservations."
+
+- **5a. Admin closes a Drop early:**
+  - 5a1. System sets Drop close time to now.
+  - 5a2. Storefront marks Drop as closed; no new reservations accepted.
+  - 5a3. Existing orders are unaffected.
+
+- **6a. Drop open time passes with no active Drop configured:**
+  - 6a1. Storefront shows no active drop; Add-to-Cart is disabled regardless of Factory Switch state.
+
+---
+
+### UC-06: Fulfill an Order
+
+**Primary Actor:** Admin (Uncle Mike)
+**Scope:** Fidget Fun! PWA — Admin Panel
+**Level:** 🌊 User Goal
+**Trigger:** Admin is notified that a customer's order is fully printed and ready to pack.
+
+**Stakeholders & Interests:**
+- **Admin:** Wants 1-click InPost label generation to avoid manual data entry.
+- **Customer:** Wants timely shipment and an automatic tracking notification.
+- **InPost:** Needs accurate parcel data (weight, dimensions, Paczkomat ID).
+
+**Preconditions:**
+1. Admin is authenticated.
+2. Order status is `PACKED` (all items confirmed printed by Makers).
+
+**Minimal Guarantees:** If label generation fails, order status remains `PACKED`; Admin is shown the InPost error.
+**Success Guarantees:** InPost label is generated and associated with the order; customer receives an SMS/email with the tracking link; order status advances to `SHIPPED`.
+
+---
+
+**Main Success Scenario:**
+
+1. Admin **selects** an order with status `PACKED` from the fulfillment queue.
+2. Admin **reviews** order contents and the customer's designated Paczkomat.
+3. Admin **requests** InPost label generation.
+4. System **calls** InPost API with order details (customer name, phone, Paczkomat ID, parcel size).
+5. System **receives** the label PDF and tracking number from InPost.
+6. Admin **prints or displays** the label for physical attachment.
+7. Admin **marks** the order as Shipped.
+8. System **updates** order status to `SHIPPED` and **sends** the tracking notification to the customer.
+
+---
+
+**Extensions:**
+
+- **4a. InPost API returns an error:**
+  - 4a1. System displays the InPost error message to Admin.
+  - 4a2. Admin may retry or resolve the issue via InPost dashboard directly.
+  - 4a3. Order status remains `PACKED`.
+
+- **7a. Admin marks as Shipped without a generated label:**
+  - 7a1. System warns Admin that no InPost label is on record.
+  - 7a2. Admin may override (e.g., for local pickup orders).
+
+---
+
+### UC-07: Issue a Refund
+
+**Primary Actor:** Admin (Uncle Mike)
+**Scope:** Fidget Fun! PWA — Admin Panel
+**Level:** 🌊 User Goal
+**Trigger:** Customer requests a cancellation, or Admin identifies a fulfilment problem.
+
+**Stakeholders & Interests:**
+- **Customer:** Wants money returned to original payment method; wants clear communication.
+- **Admin:** Wants the Print Slot restored to capacity so another customer can buy.
+- **Payment Gateway:** Must receive a valid refund request referencing the original transaction.
+
+**Preconditions:**
+1. Admin is authenticated.
+2. Order exists with status `PAID`, `PRINTING`, or `PACKED` (not yet `SHIPPED`).
+
+**Minimal Guarantees:** If the gateway refund fails, order status is not changed; Admin is notified to retry.
+**Success Guarantees:** Full PLN amount returned to customer's payment method; Print Slot restored to Drop capacity; order status set to `REFUNDED`; customer notified.
+
+---
+
+**Main Success Scenario:**
+
+1. Admin **locates** the order to refund.
+2. Admin **initiates** the refund action.
+3. System **submits** the refund request to the Payment Gateway referencing the original BLIK transaction.
+4. Gateway **confirms** the refund.
+5. System **restores** 1 Print Slot to the Drop's capacity, **sets** order status to `REFUNDED`, and **notifies** the customer.
+
+---
+
+**Extensions:**
+
+- **2a. Order status is `SHIPPED` or `DELIVERED`:**
+  - 2a1. System blocks the refund flow and directs Admin to handle via the gateway dashboard directly (post-shipment returns are out of scope for MVP).
+
+- **4a. Gateway rejects the refund (e.g., funds already settled):**
+  - 4a1. System alerts Admin with gateway error details.
+  - 4a2. Admin handles out-of-band. Print Slot is not restored until Admin manually confirms resolution.
+
+---
+
+### UC-08: View Aggregated Print Batch
+
+**Primary Actor:** Makers (Leo or Sam)
+**Scope:** Fidget Fun! PWA — Makers View
+**Level:** 🌊 User Goal
+**Trigger:** Makers open their view to plan the day's printing at the start of a production batch.
+
+**Stakeholders & Interests:**
+- **Makers:** Want to know exactly what to load into the printer — grouped by filament color to minimize spool changes.
+- **Admin:** Wants the boys to have exactly the information they need and nothing else (no prices, no customer contact details).
+
+**Preconditions:**
+1. Makers are authenticated (PIN).
+2. At least one Drop has closed or is active with confirmed orders.
+
+**Minimal Guarantees:** Read-only view; Makers cannot modify any order or capacity data.
+**Success Guarantees:** Makers see a complete, accurate list grouped by filament color, showing model names and quantities.
+
+---
+
+**Main Success Scenario:**
+
+1. Maker **opens** the Makers View.
+2. System **selects** the most recent closed (or active) Drop with `PAID` orders.
+3. System **aggregates** all order items by filament color, then by model within each color.
+4. System **displays** the Print Batch:
+   - *Silk Blue → 5× Crystal Dragon, 2× Infinity Spinner*
+   - *Matte Black → 10× Hex Puzzle*
+   - *[Mystery Box items shown as: "Filament: TBD → 3× Mystery Box"]*
+5. Maker **uses** the list to load filament and configure the print queue.
+
+---
+
+**Extensions:**
+
+- **2a. No closed Drop with unprinted items:**
+  - 2a1. System displays "Nothing to print right now. Check back when a Drop closes!"
+
+- **4a. Mystery Box items are included:**
+  - 4a1. Mystery Box items are shown in a separate group with filament marked as "Your choice" — the boys pick based on leftover spool availability.
+
+---
+
+### UC-09: Mark a Print Job as Complete
+
+**Primary Actor:** Makers (Leo or Sam)
+**Scope:** Fidget Fun! PWA — Makers View
+**Level:** 🌊 User Goal
+**Trigger:** A print job (one batch line item for one customer order) finishes on the printer.
+
+**Stakeholders & Interests:**
+- **Makers:** Want a fast, single-tap confirmation — no typing.
+- **Admin (Uncle Mike):** Needs to know when a *complete* customer order is ready to pack; does not want per-item alerts.
+
+**Preconditions:**
+1. Makers are authenticated.
+2. A Print Batch with at least one unprinted job is displayed (UC-08).
+
+**Minimal Guarantees:** Each check-off action is persisted immediately; a network error does not cause a double-mark.
+**Success Guarantees:** Job is recorded as `PRINTED`. When all jobs for a given customer order reach `PRINTED`, system changes order status to `PACKED` and sends Admin an alert.
+
+---
+
+**Main Success Scenario:**
+
+1. Maker **identifies** a completed print job on the Print Batch list.
+2. Maker **marks** the job as done.
+3. System **records** the job as `PRINTED` with a timestamp.
+4. System **checks** whether all items for the corresponding customer order are now `PRINTED`.
+5. If yes: System **advances** order status to `PACKED` and **notifies** Admin: *"Order #[N] is fully printed and ready to pack."*
+
+---
+
+**Extensions:**
+
+- **2a. Maker accidentally marks a job as done:**
+  - 2a1. Maker can **undo** the mark within 60 seconds (before the batch-completion check triggers an Admin alert).
+  - 2a2. After 60 seconds, Admin must manually revert via the Admin panel.
+
+- **4a. The order contains a Mystery Box item not yet assigned a model:**
+  - 4a1. System does not count the Mystery Box item as blocking order completion — it is treated as complete when the Maker marks it.
+
+---
+
+## Appendix: Use Case Relationships
+
+```
+UC-02 (Mystery Box) ──extends──► UC-01 (Reserve Product) [from step 3]
+
+UC-08 (View Batch)  ──precedes──► UC-09 (Mark Printed)
+
+UC-09 (Mark Printed) ──triggers──► UC-06 (Fulfill Order) [Admin alert]
+
+UC-05 (Manage Drop) ──enables──► UC-01, UC-02 [Drop must exist & be open]
+
+UC-04 (Factory Switch OFF) ──blocks──► UC-01, UC-02 [Add-to-Cart disabled]
+```
