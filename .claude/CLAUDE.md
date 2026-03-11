@@ -25,24 +25,6 @@ pnpm db:generate  # generate migrations
 pnpm db:studio    # drizzle studio
 ```
 
-## Project Structure
-```
-src/
-  lib/
-    server/
-      db/
-        schema.ts      # Drizzle schema — single source of truth
-        index.ts       # DB connection
-    components/        # Svelte components
-    stores/            # Svelte stores / runes-based state
-  routes/
-    (shop)/            # Customer-facing storefront
-    admin/             # Uncle Mike's admin panel
-    makers/            # Leo & Sam's read-only production view
-    api/               # SvelteKit API routes
-  app.d.ts             # App type declarations
-  app.html             # HTML shell
-```
 
 ## Domain Model
 | Entity | Key fields |
