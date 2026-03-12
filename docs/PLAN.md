@@ -1,6 +1,6 @@
 # Fidget Fun! — Implementation Plan
 
-**Status:** Phase 1 Complete + Integration Tests ✅ | Phase 2 Ready | **Last updated:** 2026-03-12
+**Status:** Phase 1 ✅ | Phase 2 ✅ COMPLETE | Phase 3 🚀 NEXT | **Last updated:** 2026-03-13
 
 ---
 
@@ -108,22 +108,26 @@ pnpm test:watch        # Watch mode
 
 ---
 
-## Phase 2 — Admin Panel `/admin` 🚀 NEXT
+## Phase 2 — Admin Panel `/admin` ✅ COMPLETE
 
 **Goal:** Uncle Mike can operate the business without touching code.
 
-**Priority:** HIGH - Required for business operations
+**Test Coverage:**
+- 9 auth unit tests (scrypt password hashing, HMAC session tokens)
+- 12 admin queries integration tests (factory switch, order filters, ship, refund, stats)
+- 14 drop management integration tests (create → publish → close lifecycle, product assignment)
+- **37 integration tests total | 95 unit tests total**
 
-### Implementation Strategy
+### Implementation Strategy (COMPLETED)
 
-**Recommended Approach:** Incremental delivery in 3 sub-phases
-1. **Phase 2A**: Critical Operations (Factory Switch, Order Management)
-2. **Phase 2B**: Drop Management (Create, Edit, Publish drops)
-3. **Phase 2C**: Automation (Cron jobs, bulk operations)
+Sub-phases completed:
+1. **Phase 2A** ✅: Auth module, admin queries, login, dashboard, factory switch, orders list/detail
+2. **Phase 2B** ✅: Drop management (create/edit/publish/close, product assignment)
+3. **Phase 2C** ✅: Cron endpoint `/api/cron/release-locks` + `vercel.json`
 
 ---
 
-### Phase 2A — Critical Operations (Week 1)
+### Phase 2A — Critical Operations ✅
 
 **Goal:** Enable day-to-day business operations
 
@@ -181,7 +185,7 @@ export function verifyAdminSession(cookies: Cookies): boolean
 
 ---
 
-### Phase 2B — Drop Management (Week 2)
+### Phase 2B — Drop Management ✅
 
 **Goal:** Create and manage weekly drops
 
@@ -220,7 +224,7 @@ export async function getDropProducts(dropId: number)
 
 ---
 
-### Phase 2C — Automation & Polish (Week 3)
+### Phase 2C — Automation ✅
 
 **Goal:** Automated processes and UX improvements
 
@@ -269,7 +273,7 @@ export async function GET({ request }) {
 
 ---
 
-## Phase 3 — Makers View `/makers`
+## Phase 3 — Makers View `/makers` 🚀 NEXT
 
 **Goal:** Leo & Sam can manage their print queue from a phone.
 
