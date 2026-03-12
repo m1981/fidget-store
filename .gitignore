@@ -1,0 +1,26 @@
+node_modules
+.svelte-kit
+build
+dist
+.env
+.env.*
+!.env.example
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Drizzle migrations
+drizzle/
+
+# Vercel
+.vercel/
+
+# Testing
+test-results/
+playwright-report/
+

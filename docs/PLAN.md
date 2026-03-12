@@ -1,6 +1,6 @@
 # Fidget Fun! — Implementation Plan
 
-**Status:** Phase 0 in progress | **Last updated:** 2026-03-11
+**Status:** Phase 2 ready to start | **Last updated:** 2026-03-12
 
 ---
 
@@ -35,49 +35,56 @@ The DDD doc (`02-domain-driven-design-and-rules.md`) is canonical. CLAUDE.md has
 
 ---
 
-## Phase 0 — Schema & Foundation ✅ IN PROGRESS
+## Phase 0 — Schema & Foundation ✅ COMPLETE
 
 **Goal:** DB schema, business logic module, DB client, Vitest coverage.
 
 - [x] `src/lib/server/db/schema.ts` — Drizzle schema (all tables + enums)
 - [x] `src/lib/server/db/index.ts` — Neon postgres client
 - [x] `src/lib/server/capacity.ts` — Capacity engine (pure functions, no DB)
-- [x] `src/lib/server/capacity.test.ts` — Vitest tests for capacity engine
-- [ ] `pnpm db:push` — apply schema to Neon (requires DATABASE_URL)
-- [ ] `.env` setup
+- [x] `src/lib/server/capacity.test.ts` — 34 tests passing
+- [ ] `pnpm db:push` — apply schema to Neon (requires DATABASE_URL in .env)
 
-**Outcome:** Schema is live, all business logic is tested, types exported for use across the app.
+**Outcome:** Schema defined, 34 capacity engine tests green, types exported for use across the app.
 
 ---
 
-## Phase 1 — Customer Storefront `/(shop)`
+## Phase 1 — Customer Storefront `/(shop)` ✅ COMPLETE
 
 **Goal:** Full purchase flow for a customer on mobile.
 
-### Routes
-| File | Purpose |
-|---|---|
-| `src/routes/(shop)/+layout.server.ts` | Load `global_settings` + active `drop` for all shop pages |
-| `src/routes/(shop)/+page.svelte` | Homepage: Factory Switch widget, Drop countdown, product grid |
-| `src/routes/(shop)/products/[id]/+page.server.ts` | Load product + variants |
-| `src/routes/(shop)/products/[id]/+page.svelte` | PDP: swatches, print time widget, Add to Cart |
-| `src/routes/(shop)/checkout/+page.server.ts` | Capacity validation action, BLIK initiation action |
-| `src/routes/(shop)/checkout/+page.svelte` | Checkout form: email/phone, InPost Geowidget, BLIK timer |
-| `src/routes/(shop)/orders/[id]/+page.server.ts` | Load order by ID |
-| `src/routes/(shop)/orders/[id]/+page.svelte` | Order status display |
-| `src/routes/api/webhook/payment/+server.ts` | Payment gateway webhook: hard deduct, order → PAID |
+**Architecture notes:**
+- Cart is client-side `$state` in `src/lib/cart.svelte.ts`, persisted to `sessionStorage`
+- Checkout sends only `variantId + quantity`; server re-validates prices and capacity from DB
+- Atomic soft lock uses Drizzle UPDATE with conditional WHERE (no SELECT FOR UPDATE needed)
+- BLIK payment gateway call is **stubbed** — real integration is Phase 4
 
-### Components (co-located or `src/lib/components/`)
-- `PrinterStatus.svelte` — Factory Switch widget (ON/OFF state)
-- `DropCountdown.svelte` — live countdown to drop close
-- `ScarcityBadge.svelte` — "Only N minutes left!" display
-- `ColorSwatch.svelte` — filament color picker
-- `BlikTimer.svelte` — 2-minute countdown + 6-digit input
-- `InPostWidget.svelte` — embed InPost Geowidget script
-
-### Tests
-- `src/lib/server/checkout.test.ts` — order creation, soft lock logic
-- `src/routes/(shop)/checkout/checkout.svelte.test.ts` — BlikTimer component
+### Files
+| File | Status | Purpose |
+|---|---|---|
+| `src/lib/formatting.ts` | [x] | PLN formatter, status labels, print time display |
+| `src/lib/formatting.test.ts` | [x] | 16 tests |
+| `src/lib/server/orders.ts` | [x] | Pure order logic: validateDropIsOpen, computeTotal, lock expiry |
+| `src/lib/server/orders.test.ts` | [x] | 14 tests |
+| `src/lib/server/db/queries.ts` | [x] | All DB interactions |
+| `src/lib/cart.svelte.ts` | [x] | Client cart state (runes, sessionStorage) |
+| `src/routes/(shop)/+layout.server.ts` | [x] | Load global_settings + active drop |
+| `src/routes/(shop)/+layout.svelte` | [x] | Shop shell with header |
+| `src/routes/(shop)/+page.server.ts` | [x] | Load drop products |
+| `src/routes/(shop)/+page.svelte` | [x] | Homepage: status, countdown, product grid |
+| `src/routes/(shop)/products/[id]/+page.server.ts` | [x] | Load product + variants |
+| `src/routes/(shop)/products/[id]/+page.svelte` | [x] | PDP: swatches, print time, Add to Cart |
+| `src/routes/(shop)/checkout/+page.server.ts` | [x] | Checkout action: capacity + order creation |
+| `src/routes/(shop)/checkout/+page.svelte` | [x] | Checkout form + BLIK timer |
+| `src/routes/(shop)/orders/[id]/+page.server.ts` | [x] | Load order |
+| `src/routes/(shop)/orders/[id]/+page.svelte` | [x] | Order status display |
+| `src/routes/api/webhook/payment/+server.ts` | [x] | Payment webhook (signature stubbed) |
+| `src/lib/components/PrinterStatus.svelte` | [x] | Factory Switch widget |
+| `src/lib/components/DropCountdown.svelte` | [x] | Live drop countdown |
+| `src/lib/components/ScarcityBadge.svelte` | [x] | Remaining capacity badge |
+| `src/lib/components/ColorSwatch.svelte` | [x] | Filament colour picker |
+| `src/lib/components/BlikTimer.svelte` | [x] | 2-min countdown + BLIK input |
+| `src/lib/components/BlikTimer.svelte.test.ts` | [x] | Component tests |
 
 ---
 
