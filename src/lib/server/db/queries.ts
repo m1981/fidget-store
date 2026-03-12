@@ -261,6 +261,128 @@ export async function confirmPayment(
 	return { ok: true, orderId: updated.id };
 }
 
+// ─── Admin: Global Settings ───────────────────────────────────────────────────
+
+export async function updateGlobalSettings(
+	data: Partial<Pick<GlobalSettings, 'printer_is_on' | 'status_message'>>
+): Promise<GlobalSettings> {
+	const [updated] = await db
+		.update(globalSettings)
+		.set(data)
+		.where(eq(globalSettings.id, 1))
+		.returning();
+	if (!updated) throw new Error('global_settings row not found — run seed');
+	return updated;
+}
+
+// ─── Admin: Orders ────────────────────────────────────────────────────────────
+
+export interface OrderFilters {
+	status?: Order['status'];
+	dropId?: number;
+}
+
+/** Returns orders (newest first) with optional status/drop filter */
+export async function getOrdersWithFilters(filters: OrderFilters = {}): Promise<Order[]> {
+	const conditions = [];
+	if (filters.status) conditions.push(eq(order.status, filters.status));
+	if (filters.dropId) conditions.push(eq(order.drop_id, filters.dropId));
+
+	return await db
+		.select()
+		.from(order)
+		.where(conditions.length ? and(...conditions) : undefined)
+		.orderBy(sql`created_at DESC`);
+}
+
+/**
+ * Marks an order as SHIPPED with a tracking number.
+ * Only transitions from PACKED are allowed.
+ */
+export async function markOrderAsShipped(
+	orderId: string,
+	trackingNumber: string
+): Promise<{ ok: true } | { ok: false; reason: 'ORDER_NOT_FOUND' | 'INVALID_STATUS' }> {
+	const [updated] = await db
+		.update(order)
+		.set({ status: 'SHIPPED', tracking_number: trackingNumber, updated_at: new Date() })
+		.where(and(eq(order.id, orderId), eq(order.status, 'PACKED')))
+		.returning({ id: order.id });
+	if (!updated) {
+		const existing = await db.select({ id: order.id }).from(order).where(eq(order.id, orderId));
+		return { ok: false, reason: existing.length ? 'INVALID_STATUS' : 'ORDER_NOT_FOUND' };
+	}
+	return { ok: true };
+}
+
+/**
+ * Refunds an order: restores capacity to the drop, sets status to REFUNDED.
+ * Only PAID / PRINTING / PACKED orders can be refunded.
+ */
+export async function refundOrder(
+	orderId: string
+): Promise<{ ok: true } | { ok: false; reason: 'ORDER_NOT_FOUND' | 'INVALID_STATUS' }> {
+	const refundableStatuses: Order['status'][] = ['PAID', 'PRINTING', 'PACKED'];
+
+	return await db.transaction(async (tx) => {
+		const [existing] = await tx
+			.select({ id: order.id, status: order.status, drop_id: order.drop_id, locked_minutes: order.locked_minutes })
+			.from(order)
+			.where(eq(order.id, orderId));
+
+		if (!existing) return { ok: false, reason: 'ORDER_NOT_FOUND' };
+		if (!refundableStatuses.includes(existing.status)) return { ok: false, reason: 'INVALID_STATUS' };
+
+		// Restore capacity
+		await tx
+			.update(drop)
+			.set({ allocated_minutes: sql`allocated_minutes - ${existing.locked_minutes}` })
+			.where(eq(drop.id, existing.drop_id));
+
+		// Mark refunded
+		await tx
+			.update(order)
+			.set({ status: 'REFUNDED', updated_at: new Date() })
+			.where(eq(order.id, orderId));
+
+		return { ok: true };
+	});
+}
+
+// ─── Admin: Dashboard Stats ────────────────────────────────────────────────────
+
+export interface DashboardStats {
+	totalOrders: number;
+	pendingOrders: number;
+	paidOrders: number;
+	activeDropId: number | null;
+	activeDropCapacityPct: number | null;
+}
+
+export async function getDashboardStats(): Promise<DashboardStats> {
+	const [stats] = await db
+		.select({
+			totalOrders: sql<number>`count(*)::int`,
+			pendingOrders: sql<number>`count(*) filter (where ${order.status} = 'PENDING_PAYMENT')::int`,
+			paidOrders: sql<number>`count(*) filter (where ${order.status} = 'PAID')::int`
+		})
+		.from(order);
+
+	const activeDrop = await getActiveDrop();
+	const activeDropCapacityPct =
+		activeDrop && activeDrop.total_capacity_minutes > 0
+			? Math.round((activeDrop.allocated_minutes / activeDrop.total_capacity_minutes) * 100)
+			: null;
+
+	return {
+		totalOrders: stats?.totalOrders ?? 0,
+		pendingOrders: stats?.pendingOrders ?? 0,
+		paidOrders: stats?.paidOrders ?? 0,
+		activeDropId: activeDrop?.id ?? null,
+		activeDropCapacityPct
+	};
+}
+
 /**
  * Releases all expired soft locks (BLIK timeout).
  * Returns allocated_minutes back to the drop and marks orders CANCELLED.
