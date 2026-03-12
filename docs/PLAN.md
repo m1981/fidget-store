@@ -1,6 +1,6 @@
 # Fidget Fun! — Implementation Plan
 
-**Status:** Phase 2 ready to start | **Last updated:** 2026-03-12
+**Status:** Phase 1 Complete + Integration Tests ✅ | Phase 2 Ready | **Last updated:** 2026-03-12
 
 ---
 
@@ -59,6 +59,11 @@ The DDD doc (`02-domain-driven-design-and-rules.md`) is canonical. CLAUDE.md has
 - Atomic soft lock uses Drizzle UPDATE with conditional WHERE (no SELECT FOR UPDATE needed)
 - BLIK payment gateway call is **stubbed** — real integration is Phase 4
 
+**Testing Coverage:**
+- ✅ **Unit Tests**: 64 tests passing (formatting, capacity, orders, components)
+- ✅ **Integration Tests**: 11 tests passing (soft lock, payment confirmation, capacity restoration)
+- 📊 **Test Infrastructure**: Vitest with 3 projects (client, server, integration)
+
 ### Files
 | File | Status | Purpose |
 |---|---|---|
@@ -86,24 +91,181 @@ The DDD doc (`02-domain-driven-design-and-rules.md`) is canonical. CLAUDE.md has
 | `src/lib/components/BlikTimer.svelte` | [x] | 2-min countdown + BLIK input |
 | `src/lib/components/BlikTimer.svelte.test.ts` | [x] | Component tests |
 
+### Integration Tests
+| File | Status | Tests | Purpose |
+|---|---|---|---|
+| `src/lib/test-helpers/db-setup.ts` | [x] | - | Test data factories & cleanup utilities |
+| `src/lib/server/db/soft-lock.integration.test.ts` | [x] | 8 | Order creation, soft lock, payment confirmation |
+| `src/lib/server/db/capacity-restoration.integration.test.ts` | [x] | 3 | Expired lock release, capacity restoration |
+
+**Test Commands:**
+```bash
+pnpm test              # Run all tests
+pnpm test:unit         # Unit tests only
+pnpm test:integration  # Integration tests only
+pnpm test:watch        # Watch mode
+```
+
 ---
 
-## Phase 2 — Admin Panel `/admin`
+## Phase 2 — Admin Panel `/admin` 🚀 NEXT
 
 **Goal:** Uncle Mike can operate the business without touching code.
 
-### Routes
-| File | Purpose |
-|---|---|
-| `src/routes/admin/+layout.server.ts` | Auth guard (password check) |
-| `src/routes/admin/+page.svelte` | Dashboard overview |
-| `src/routes/admin/factory/+page.svelte` | Factory Switch toggle + message |
-| `src/routes/admin/drops/+page.server.ts` | List drops |
-| `src/routes/admin/drops/new/+page.server.ts` | Create drop action |
-| `src/routes/admin/drops/[id]/+page.server.ts` | Edit drop, assign products, publish |
-| `src/routes/admin/orders/+page.server.ts` | Order list with status filters |
-| `src/routes/admin/orders/[id]/+page.server.ts` | Order detail, fulfillment, refund actions |
-| `src/routes/api/cron/release-locks/+server.ts` | Vercel Cron: release expired soft locks |
+**Priority:** HIGH - Required for business operations
+
+### Implementation Strategy
+
+**Recommended Approach:** Incremental delivery in 3 sub-phases
+1. **Phase 2A**: Critical Operations (Factory Switch, Order Management)
+2. **Phase 2B**: Drop Management (Create, Edit, Publish drops)
+3. **Phase 2C**: Automation (Cron jobs, bulk operations)
+
+---
+
+### Phase 2A — Critical Operations (Week 1)
+
+**Goal:** Enable day-to-day business operations
+
+#### Routes to Implement
+| Priority | File | Purpose | Complexity |
+|---|---|---|---|
+| 🔴 HIGH | `src/routes/admin/+layout.server.ts` | Auth guard (password check) | Low |
+| 🔴 HIGH | `src/routes/admin/+layout.svelte` | Admin shell with navigation | Low |
+| 🔴 HIGH | `src/routes/admin/+page.svelte` | Dashboard overview (stats) | Medium |
+| 🔴 HIGH | `src/routes/admin/factory/+page.server.ts` | Factory Switch actions | Low |
+| 🔴 HIGH | `src/routes/admin/factory/+page.svelte` | Toggle + status message form | Low |
+| 🔴 HIGH | `src/routes/admin/orders/+page.server.ts` | Order list with filters | Medium |
+| 🔴 HIGH | `src/routes/admin/orders/+page.svelte` | Order table with status badges | Medium |
+| 🔴 HIGH | `src/routes/admin/orders/[id]/+page.server.ts` | Order detail + actions | High |
+| 🔴 HIGH | `src/routes/admin/orders/[id]/+page.svelte` | Order detail view + fulfillment | High |
+
+#### Database Queries to Add
+```typescript
+// src/lib/server/db/queries.ts
+
+// Factory Switch
+export async function updateFactorySwitch(isOn: boolean, message: string)
+export async function getFactoryStatus()
+
+// Order Management
+export async function getOrdersWithFilters(filters: OrderFilters)
+export async function getOrderById(orderId: string)
+export async function markOrderAsShipped(orderId: string, trackingNumber: string)
+export async function refundOrder(orderId: string)
+
+// Dashboard Stats
+export async function getDashboardStats()
+```
+
+#### Auth Implementation
+```typescript
+// src/lib/server/auth.ts
+export function hashPassword(password: string): Promise<string>
+export function verifyPassword(password: string, hash: string): Promise<boolean>
+export function createAdminSession(cookies: Cookies): void
+export function verifyAdminSession(cookies: Cookies): boolean
+```
+
+**Deliverables:**
+- ✅ Admin can log in with password
+- ✅ Admin can toggle Factory Switch ON/OFF
+- ✅ Admin can view all orders with status filters
+- ✅ Admin can view order details
+- ✅ Admin can mark orders as shipped (manual tracking number entry)
+- ✅ Admin can issue refunds
+
+**Testing:**
+- Integration tests for order management queries
+- Integration tests for refund flow (capacity restoration)
+
+---
+
+### Phase 2B — Drop Management (Week 2)
+
+**Goal:** Create and manage weekly drops
+
+#### Routes to Implement
+| Priority | File | Purpose | Complexity |
+|---|---|---|---|
+| 🟡 MEDIUM | `src/routes/admin/drops/+page.server.ts` | List all drops | Low |
+| 🟡 MEDIUM | `src/routes/admin/drops/+page.svelte` | Drop list with status | Low |
+| 🟡 MEDIUM | `src/routes/admin/drops/new/+page.server.ts` | Create drop action | Medium |
+| 🟡 MEDIUM | `src/routes/admin/drops/new/+page.svelte` | Drop creation form | Medium |
+| 🟡 MEDIUM | `src/routes/admin/drops/[id]/+page.server.ts` | Edit drop, assign products | High |
+| 🟡 MEDIUM | `src/routes/admin/drops/[id]/+page.svelte` | Drop editor with product picker | High |
+
+#### Database Queries to Add
+```typescript
+// Drop Management
+export async function getAllDrops()
+export async function createDrop(data: NewDrop)
+export async function updateDrop(dropId: number, data: Partial<Drop>)
+export async function publishDrop(dropId: number)
+export async function closeDrop(dropId: number)
+export async function assignProductsToDrop(dropId: number, productIds: number[])
+export async function getDropProducts(dropId: number)
+```
+
+**Deliverables:**
+- ✅ Admin can view all drops (past, active, draft)
+- ✅ Admin can create new drop with capacity and dates
+- ✅ Admin can assign products to a drop
+- ✅ Admin can publish a drop (DRAFT → ACTIVE)
+- ✅ Admin can close a drop (ACTIVE → CLOSED)
+
+**Testing:**
+- Integration tests for drop lifecycle (create → publish → close)
+- Integration tests for product assignment
+
+---
+
+### Phase 2C — Automation & Polish (Week 3)
+
+**Goal:** Automated processes and UX improvements
+
+#### Routes to Implement
+| Priority | File | Purpose | Complexity |
+|---|---|---|---|
+| 🟢 LOW | `src/routes/api/cron/release-locks/+server.ts` | Vercel Cron: release expired soft locks | Low |
+| 🟢 LOW | `src/routes/admin/products/+page.server.ts` | Product management (optional) | Medium |
+
+#### Cron Job Setup
+```typescript
+// src/routes/api/cron/release-locks/+server.ts
+import { releaseExpiredSoftLocks } from '$lib/server/db/queries';
+
+export async function GET({ request }) {
+  // Verify Vercel Cron secret
+  const authHeader = request.headers.get('authorization');
+  if (authHeader !== `Bearer ${env.CRON_SECRET}`) {
+    return new Response('Unauthorized', { status: 401 });
+  }
+
+  const result = await releaseExpiredSoftLocks();
+  return json({ released: result.released });
+}
+```
+
+**Vercel Configuration:**
+```json
+// vercel.json
+{
+  "crons": [{
+    "path": "/api/cron/release-locks",
+    "schedule": "* * * * *"
+  }]
+}
+```
+
+**Deliverables:**
+- ✅ Automated soft lock release (every minute)
+- ✅ Admin dashboard with real-time stats
+- ✅ Bulk operations (optional: bulk refund, bulk ship)
+
+**Testing:**
+- Integration test for cron endpoint
+- E2E test for admin login flow
 
 ---
 
