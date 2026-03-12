@@ -1,13 +1,13 @@
 import { error, fail, redirect } from '@sveltejs/kit';
 import type { Actions, PageServerLoad } from './$types';
 import {
-	getAllDrops,
 	updateDrop,
 	publishDrop,
 	closeDrop,
 	setDropProducts,
 	getAllActiveProducts,
-	getDropProductsAdmin
+	getDropProductsAdmin,
+	advancePaidOrdersToPrinting
 } from '$lib/server/db/queries';
 import { db } from '$lib/server/db';
 import { drop } from '$lib/server/db/schema';
@@ -93,6 +93,8 @@ export const actions: Actions = {
 				action: 'close'
 			});
 		}
+		// Advance all PAID orders to PRINTING so Makers can see them
+		await advancePaidOrdersToPrinting(dropId);
 		return { success: true, action: 'close' };
 	}
 };

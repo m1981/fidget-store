@@ -322,6 +322,19 @@ export async function getAllActiveProducts(): Promise<Product[]> {
 }
 
 /**
+ * When Admin closes a drop, advances all PAID orders in that drop to PRINTING.
+ * Called after closeDrop() to unlock the Makers view.
+ */
+export async function advancePaidOrdersToPrinting(dropId: number): Promise<{ count: number }> {
+	const updated = await db
+		.update(order)
+		.set({ status: 'PRINTING', updated_at: new Date() })
+		.where(and(eq(order.drop_id, dropId), eq(order.status, 'PAID')))
+		.returning({ id: order.id });
+	return { count: updated.length };
+}
+
+/**
  * Confirms a payment: sets order to PAID, clears the soft lock expiry.
  * Called from the payment webhook. The allocated_minutes stay — lock becomes permanent.
  */
@@ -468,6 +481,166 @@ export async function getDashboardStats(): Promise<DashboardStats> {
 		activeDropId: activeDrop?.id ?? null,
 		activeDropCapacityPct
 	};
+}
+
+// ─── Makers: Print Batch & FIFO ───────────────────────────────────────────────
+
+export interface PrintBatchGroup {
+	variantId: number;
+	filamentColor: string;
+	hexCode: string;
+	productName: string;
+	/** Total units to print across all PRINTING orders */
+	totalUnits: number;
+	/** Units already marked PRINTED */
+	printedUnits: number;
+}
+
+/**
+ * Returns the print batch for the most recent CLOSED drop.
+ * Groups order items by variant: total units needed + printed so far.
+ */
+export async function getPrintBatch(): Promise<{ dropId: number | null; items: PrintBatchGroup[] }> {
+	// Find the most recent CLOSED drop
+	const [closedDrop] = await db
+		.select({ id: drop.id })
+		.from(drop)
+		.where(eq(drop.status, 'CLOSED'))
+		.orderBy(sql`closes_at DESC`)
+		.limit(1);
+
+	if (!closedDrop) return { dropId: null, items: [] };
+
+	const rows = await db
+		.select({
+			variantId: productVariant.id,
+			filamentColor: productVariant.filament_color,
+			hexCode: productVariant.hex_code,
+			productName: product.name,
+			itemStatus: orderItem.status,
+			quantity: orderItem.quantity
+		})
+		.from(orderItem)
+		.innerJoin(order, eq(orderItem.order_id, order.id))
+		.innerJoin(productVariant, eq(orderItem.variant_id, productVariant.id))
+		.innerJoin(product, eq(productVariant.product_id, product.id))
+		.where(and(eq(order.drop_id, closedDrop.id), eq(order.status, 'PRINTING')));
+
+	const groups = new Map<number, PrintBatchGroup>();
+	for (const row of rows) {
+		if (!groups.has(row.variantId)) {
+			groups.set(row.variantId, {
+				variantId: row.variantId,
+				filamentColor: row.filamentColor,
+				hexCode: row.hexCode,
+				productName: row.productName,
+				totalUnits: 0,
+				printedUnits: 0
+			});
+		}
+		const g = groups.get(row.variantId)!;
+		g.totalUnits += row.quantity;
+		if (row.itemStatus === 'PRINTED') g.printedUnits += row.quantity;
+	}
+
+	return { dropId: closedDrop.id, items: [...groups.values()] };
+}
+
+/**
+ * FIFO [+1]: marks one unit of a variant as PRINTED in the oldest eligible PRINTING order.
+ * If all items in that order are then PRINTED, advances the order to PACKED.
+ */
+export async function markNextPrinted(
+	variantId: number
+): Promise<{ ok: true; orderPacked: boolean } | { ok: false; reason: 'NOTHING_TO_PRINT' }> {
+	return await db.transaction(async (tx) => {
+		// Find the oldest PRINTING order that has a PENDING item for this variant
+		const [target] = await tx
+			.select({ itemId: orderItem.id, orderId: orderItem.order_id })
+			.from(orderItem)
+			.innerJoin(order, eq(orderItem.order_id, order.id))
+			.where(
+				and(
+					eq(orderItem.variant_id, variantId),
+					eq(orderItem.status, 'PENDING'),
+					eq(order.status, 'PRINTING')
+				)
+			)
+			.orderBy(order.created_at)
+			.limit(1);
+
+		if (!target) return { ok: false, reason: 'NOTHING_TO_PRINT' };
+
+		const now = new Date();
+
+		// Mark item PRINTED
+		await tx
+			.update(orderItem)
+			.set({ status: 'PRINTED', printed_at: now })
+			.where(eq(orderItem.id, target.itemId));
+
+		// Check if all items in this order are now PRINTED
+		const remaining = await tx
+			.select({ status: orderItem.status })
+			.from(orderItem)
+			.where(eq(orderItem.order_id, target.orderId));
+
+		const allPrinted = remaining.every((r) => r.status === 'PRINTED');
+
+		if (allPrinted) {
+			await tx
+				.update(order)
+				.set({ status: 'PACKED', updated_at: now })
+				.where(eq(order.id, target.orderId));
+		}
+
+		return { ok: true, orderPacked: allPrinted };
+	});
+}
+
+/**
+ * FIFO [-1]: undoes the last PRINTED mark for a variant within the undo window.
+ */
+export async function undoLastPrinted(
+	variantId: number
+): Promise<{ ok: true } | { ok: false; reason: 'NOTHING_TO_UNDO' | 'UNDO_WINDOW_EXPIRED' }> {
+	return await db.transaction(async (tx) => {
+		// Find the most recently printed item for this variant in PRINTING orders
+		const [target] = await tx
+			.select({ itemId: orderItem.id, orderId: orderItem.order_id, printedAt: orderItem.printed_at })
+			.from(orderItem)
+			.innerJoin(order, eq(orderItem.order_id, order.id))
+			.where(
+				and(
+					eq(orderItem.variant_id, variantId),
+					eq(orderItem.status, 'PRINTED'),
+					// Also allow undo on PACKED orders (undo advances it back to PRINTING)
+				)
+			)
+			.orderBy(sql`${orderItem.printed_at} DESC NULLS LAST`)
+			.limit(1);
+
+		if (!target || !target.printedAt) return { ok: false, reason: 'NOTHING_TO_UNDO' };
+
+		const { isWithinUndoWindow } = await import('../fifo');
+		if (!isWithinUndoWindow(target.printedAt, new Date())) {
+			return { ok: false, reason: 'UNDO_WINDOW_EXPIRED' };
+		}
+
+		// Revert item to PENDING
+		await tx
+			.update(orderItem)
+			.set({ status: 'PENDING', printed_at: null })
+			.where(eq(orderItem.id, target.itemId));
+
+		// If the order was PACKED, revert it to PRINTING
+		const [orderRow] = await tx.select({ status: order.status }).from(order).where(eq(order.id, target.orderId));
+		if (orderRow?.status === 'PACKED') {
+			await tx.update(order).set({ status: 'PRINTING', updated_at: new Date() }).where(eq(order.id, target.orderId));
+		}
+
+		return { ok: true };
+	});
 }
 
 /**
