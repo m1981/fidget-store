@@ -1,8 +1,9 @@
 <script lang="ts">
 	import { cartCount } from '$lib/cart.svelte';
 	import type { LayoutData } from './$types';
+	import type { Snippet } from 'svelte';
 
-	let { data, children }: { data: LayoutData; children: import('svelte').Snippet } = $props();
+	let { data, children } = $props<{ data: LayoutData; children: Snippet }>();
 </script>
 
 <div class="min-h-screen bg-slate-950 text-slate-100 font-mono">

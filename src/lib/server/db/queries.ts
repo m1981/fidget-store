@@ -2,7 +2,7 @@
  * All database interactions for the application.
  * Route files import from here — keeps server routes lean.
  */
-import { and, eq, lt, sql } from 'drizzle-orm';
+import { and, eq, lt, lte, gte, sql } from 'drizzle-orm';
 import { db } from './index';
 import {
 	globalSettings,
@@ -57,8 +57,8 @@ export async function getActiveDrop(): Promise<Drop | null> {
 		.where(
 			and(
 				eq(drop.status, 'ACTIVE'),
-				sql`${drop.opens_at} <= ${now}`,
-				sql`${drop.closes_at} >= ${now}`
+				lte(drop.opens_at, now),
+				gte(drop.closes_at, now)
 			)
 		)
 		.limit(1);
