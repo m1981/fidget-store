@@ -1,6 +1,6 @@
 # Fidget Fun! — Implementation Plan
 
-**Status:** Phase 1 ✅ | Phase 2 ✅ COMPLETE | Phase 3 🚀 NEXT | **Last updated:** 2026-03-13
+**Status:** Phase 1 ✅ | Phase 2 ✅ | Phase 3 ✅ COMPLETE | Phase 4 🚀 NEXT | **Last updated:** 2026-03-13
 
 ---
 
@@ -273,24 +273,30 @@ export async function GET({ request }) {
 
 ---
 
-## Phase 3 — Makers View `/makers` 🚀 NEXT
+## Phase 3 — Makers View `/makers` ✅ COMPLETE
 
 **Goal:** Leo & Sam can manage their print queue from a phone.
 
-### Routes
+**Test Coverage:** 7 unit tests (fifo.ts) + 9 integration tests (46 total)
+
+### Routes (all implemented)
 | File | Purpose |
 |---|---|
-| `src/routes/makers/+layout.server.ts` | PIN auth guard |
-| `src/routes/makers/+page.server.ts` | Load PrintBatch for latest CLOSED drop |
-| `src/routes/makers/+page.svelte` | Print Batch list grouped by filament + model |
-| `src/routes/makers/+page.server.ts` | `[+1]` / `[-1]` FIFO allocation actions |
+| `src/routes/makers/+layout.server.ts` | PIN auth guard (MAKER_PIN env var) |
+| `src/routes/makers/login/+page.{server,svelte}` | PIN login form |
+| `src/routes/makers/logout/+server.ts` | Clear session cookie |
+| `src/routes/makers/+page.server.ts` | Load PrintBatch + [+1]/[-1] actions |
+| `src/routes/makers/+page.svelte` | Print batch grouped by filament, progress bar, tap targets |
 
-### Tests
-- `src/lib/server/fifo.test.ts` — FIFO allocation logic, undo window
+### Key Queries
+- `getPrintBatch()` — groups PRINTING items by variant for latest CLOSED drop
+- `markNextPrinted(variantId)` — FIFO oldest order first; auto-advances to PACKED
+- `undoLastPrinted(variantId)` — undo within 5-min window; reverts PACKED→PRINTING
+- `advancePaidOrdersToPrinting(dropId)` — called by admin on drop close
 
 ---
 
-## Phase 4 — Integrations
+## Phase 4 — Integrations 🚀 NEXT
 
 | Integration | Where | Notes |
 |---|---|---|
