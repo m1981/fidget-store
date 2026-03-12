@@ -2,7 +2,7 @@
  * All database interactions for the application.
  * Route files import from here — keeps server routes lean.
  */
-import { and, eq, lt, lte, gte, sql } from 'drizzle-orm';
+import { and, eq, lt, lte, gte, sql, isNotNull } from 'drizzle-orm';
 import { db } from './index';
 import {
 	globalSettings,
@@ -272,7 +272,13 @@ export async function releaseExpiredSoftLocks(): Promise<{ released: number }> {
 	const expired = await db
 		.select({ id: order.id, drop_id: order.drop_id, locked_minutes: order.locked_minutes })
 		.from(order)
-		.where(and(eq(order.status, 'PENDING_PAYMENT'), lt(order.locked_until, now)));
+		.where(
+			and(
+				eq(order.status, 'PENDING_PAYMENT'),
+				isNotNull(order.locked_until),
+				lt(order.locked_until, now)
+			)
+		);
 
 	if (expired.length === 0) return { released: 0 };
 
