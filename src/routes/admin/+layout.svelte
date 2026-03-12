@@ -6,6 +6,7 @@
 	const navItems = [
 		{ href: '/admin', label: 'Dashboard' },
 		{ href: '/admin/factory', label: 'Drukarka' },
+		{ href: '/admin/drops', label: 'Dropy' },
 		{ href: '/admin/orders', label: 'Zamówienia' }
 	];
 </script>

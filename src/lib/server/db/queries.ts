@@ -234,6 +234,93 @@ export async function createOrderWithSoftLock(params: {
 	});
 }
 
+// ─── Admin: Drop Management ───────────────────────────────────────────────────
+
+/** Returns all drops ordered by creation date (newest first) */
+export async function getAllDrops(): Promise<Drop[]> {
+	return await db.select().from(drop).orderBy(sql`created_at DESC`);
+}
+
+export async function createDrop(data: {
+	opensAt: Date;
+	closesAt: Date;
+	totalCapacityMinutes: number;
+}): Promise<number> {
+	const [newDrop] = await db
+		.insert(drop)
+		.values({
+			status: 'DRAFT',
+			opens_at: data.opensAt,
+			closes_at: data.closesAt,
+			total_capacity_minutes: data.totalCapacityMinutes,
+			allocated_minutes: 0
+		})
+		.returning({ id: drop.id });
+	return newDrop.id;
+}
+
+export async function updateDrop(
+	dropId: number,
+	data: Partial<Pick<Drop, 'opens_at' | 'closes_at' | 'total_capacity_minutes'>>
+): Promise<{ ok: true } | { ok: false; reason: 'NOT_FOUND' | 'NOT_DRAFT' }> {
+	const [existing] = await db.select({ status: drop.status }).from(drop).where(eq(drop.id, dropId));
+	if (!existing) return { ok: false, reason: 'NOT_FOUND' };
+	if (existing.status !== 'DRAFT') return { ok: false, reason: 'NOT_DRAFT' };
+
+	await db.update(drop).set(data).where(eq(drop.id, dropId));
+	return { ok: true };
+}
+
+export async function publishDrop(
+	dropId: number
+): Promise<{ ok: true } | { ok: false; reason: 'NOT_FOUND' | 'NOT_DRAFT' }> {
+	const [updated] = await db
+		.update(drop)
+		.set({ status: 'ACTIVE' })
+		.where(and(eq(drop.id, dropId), eq(drop.status, 'DRAFT')))
+		.returning({ id: drop.id });
+	if (!updated) {
+		const [existing] = await db.select({ id: drop.id }).from(drop).where(eq(drop.id, dropId));
+		return { ok: false, reason: existing ? 'NOT_DRAFT' : 'NOT_FOUND' };
+	}
+	return { ok: true };
+}
+
+export async function closeDrop(
+	dropId: number
+): Promise<{ ok: true } | { ok: false; reason: 'NOT_FOUND' | 'NOT_ACTIVE' }> {
+	const [updated] = await db
+		.update(drop)
+		.set({ status: 'CLOSED' })
+		.where(and(eq(drop.id, dropId), eq(drop.status, 'ACTIVE')))
+		.returning({ id: drop.id });
+	if (!updated) {
+		const [existing] = await db.select({ id: drop.id }).from(drop).where(eq(drop.id, dropId));
+		return { ok: false, reason: existing ? 'NOT_ACTIVE' : 'NOT_FOUND' };
+	}
+	return { ok: true };
+}
+
+/** Replaces the full product list for a drop (only while DRAFT or ACTIVE) */
+export async function setDropProducts(dropId: number, productIds: number[]): Promise<void> {
+	await db.transaction(async (tx) => {
+		await tx.delete(dropProduct).where(eq(dropProduct.drop_id, dropId));
+		if (productIds.length > 0) {
+			await tx.insert(dropProduct).values(productIds.map((pid) => ({ drop_id: dropId, product_id: pid })));
+		}
+	});
+}
+
+/** Returns products assigned to a drop with their variants */
+export async function getDropProductsAdmin(dropId: number): Promise<ProductWithVariants[]> {
+	return getDropProducts(dropId);
+}
+
+/** Returns all active products (for the drop product picker) */
+export async function getAllActiveProducts(): Promise<Product[]> {
+	return await db.select().from(product).where(eq(product.is_active, true)).orderBy(product.name);
+}
+
 /**
  * Confirms a payment: sets order to PAID, clears the soft lock expiry.
  * Called from the payment webhook. The allocated_minutes stay — lock becomes permanent.
