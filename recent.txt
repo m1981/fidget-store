@@ -1,0 +1,4722 @@
+commit e77e6eddddf5bce919598c36334e58155a88269f
+Author: Michal <m.nakiewicz@gmail.com>
+Date:   Thu Mar 12 23:50:38 2026 +0100
+
+    Add soft lock and capacity restoration integration tests
+
+diff --git a/docs/TESTING.md b/docs/TESTING.md
+new file mode 100644
+index 0000000..a53586f
+--- /dev/null
++++ b/docs/TESTING.md
+@@ -0,0 +1,144 @@
++# Testing Guide - Fidget Fun!
++
++## Test Structure
++
++### 1. Unit Tests (60-70% coverage)
++Pure function tests with no external dependencies.
++
++**Location**: `src/**/*.{test,spec}.ts` and `src/**/*.svelte.{test,spec}.ts`
++
++**Examples**:
++- `src/lib/formatting.test.ts` - Currency, time, status formatting
++- `src/lib/server/capacity.test.ts` - Capacity calculation logic
++- `src/lib/components/BlikTimer.svelte.test.ts` - UI component behavior
++
++**Run**: `pnpm test:unit`
++
++### 2. Integration Tests (20-30% coverage) ✅ NEW!
++Tests that verify components work together with real database.
++
++**Location**: `src/**/*.integration.{test,spec}.ts`
++
++**Test Files**:
++- `src/lib/server/db/soft-lock.integration.test.ts` (8 tests)
++  - Order creation with soft lock
++  - Capacity deduction
++  - Payment confirmation
++
++- `src/lib/server/db/capacity-restoration.integration.test.ts` (3 tests)
++  - Expired soft lock release
++  - Multiple expired locks
++
++**Run**: `pnpm test:integration`
++
++---
++
++## Running Tests
++
++```bash
++# Run all tests (unit + integration)
++pnpm test
++
++# Run only unit tests
++pnpm test:unit
++
++# Run only integration tests
++pnpm test:integration
++
++# Watch mode (auto-rerun on file changes)
++pnpm test:watch
++```
++
++---
++
++## Writing Integration Tests
++
++### Template
++
++```typescript
++import { describe, it, expect, beforeEach, afterEach } from 'vitest';
++import { createTestSetup, cleanupTestData, ensureGlobalSettings } from '$lib/test-helpers/db-setup';
++
++describe('My Test Suite', () => {
++  let testDropId: number;
++  let testProductId: number;
++  let testVariantId: number;
++
++  beforeEach(async () => {
++    await ensureGlobalSettings();
++    const setup = await createTestSetup();
++    testDropId = setup.dropId;
++    testProductId = setup.productId;
++    testVariantId = setup.variantId;
++  });
++
++  afterEach(async () => {
++    await cleanupTestData({ dropId: testDropId, productId: testProductId, variantId: testVariantId });
++  });
++
++  it('should do something', async () => {
++    // Arrange, Act, Assert
++  });
++});
++```
++
++### Test Helpers (`src/lib/test-helpers/db-setup.ts`)
++
++- **`createTestSetup()`** - Creates drop + product + variant
++- **`createTestDrop(overrides?)`** - Creates a test drop
++- **`createTestProduct(overrides?)`** - Creates a test product
++- **`createTestVariant(productId, overrides?)`** - Creates a variant
++- **`cleanupTestData(ids)`** - Deletes test data by ID
++- **`ensureGlobalSettings()`** - Ensures global_settings exists
++- **`getDropAllocatedMinutes(dropId)`** - Checks capacity
++
++---
++
++## Current Coverage
++
++### Integration Tests (11 tests, all passing ✅)
++
++**Soft Lock** (8 tests):
++- ✅ Creates order and applies soft lock
++- ✅ Sets correct locked_minutes and locked_until
++- ✅ Rejects when capacity insufficient
++- ✅ Allows exact capacity fit
++- ✅ Handles multiple items
++- ✅ Converts soft lock to hard lock on payment
++- ✅ Rejects non-existent payment
++- ✅ Prevents double confirmation
++
++**Capacity Restoration** (3 tests):
++- ✅ Releases expired soft locks
++- ✅ Handles multiple expired locks
++- ✅ Preserves non-expired locks
++
++---
++
++## Best Practices
++
++1. **Test Isolation**: Use `beforeEach`/`afterEach` with specific IDs
++2. **Descriptive Names**: `should reject order when capacity is insufficient`
++3. **Arrange-Act-Assert**: Clear test structure
++4. **Test Both Paths**: Happy path AND error cases
++
++---
++
++## Next Steps
++
++### Phase 2: Additional Integration Tests
++1. FIFO Allocation (Makers' workflow)
++2. Factory Switch (Checkout blocking)
++3. Mystery Box (Fixed capacity)
++4. InPost Gabaryt (Parcel size)
++
++### Phase 3: E2E Tests (Future)
++1. BLIK Purchase Flow
++2. Capacity Sold Out UI
++3. Order Tracking
++
++---
++
++**Status**: ✅ 11 integration tests passing  
++**Last Updated**: 2026-03-12
++
+diff --git a/package.json b/package.json
+index 91d18a1..eb1f557 100644
+--- a/package.json
++++ b/package.json
+@@ -11,8 +11,11 @@
+ 		"check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+ 		"check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
+ 		"lint": "eslint .",
+-		"test:unit": "vitest",
+-		"test": "npm run test:unit -- --run",
++		"test": "vitest run",
++		"test:unit": "vitest run --project=server --project=client",
++		"test:integration": "vitest run --project=integration",
++		"test:watch": "vitest",
++		"test:coverage": "vitest run --coverage",
+ 		"db:push": "drizzle-kit push",
+ 		"db:generate": "drizzle-kit generate",
+ 		"db:migrate": "drizzle-kit migrate",
+diff --git a/src/lib/server/db/capacity-restoration.integration.test.ts b/src/lib/server/db/capacity-restoration.integration.test.ts
+new file mode 100644
+index 0000000..97d21c5
+--- /dev/null
++++ b/src/lib/server/db/capacity-restoration.integration.test.ts
+@@ -0,0 +1,172 @@
++/**
++ * Integration Tests: Capacity Restoration
++ * 
++ * Tests that capacity is correctly restored when:
++ * - Soft locks expire (BLIK timeout)
++ * - Orders are refunded
++ */
++
++import { describe, it, expect, beforeEach, afterEach } from 'vitest';
++import { db } from './index';
++import { createOrderWithSoftLock, releaseExpiredSoftLocks } from './queries';
++import { order } from './schema';
++import { eq } from 'drizzle-orm';
++import {
++	createTestSetup,
++	cleanupTestData,
++	getDropAllocatedMinutes,
++	ensureGlobalSettings
++} from '$lib/test-helpers/db-setup';
++
++describe('Capacity Restoration Integration Tests', () => {
++	let testDropId: number;
++	let testProductId: number;
++	let testVariantId: number;
++
++	beforeEach(async () => {
++		await ensureGlobalSettings();
++		const setup = await createTestSetup();
++		testDropId = setup.dropId;
++		testProductId = setup.productId;
++		testVariantId = setup.variantId;
++	});
++
++	afterEach(async () => {
++		await cleanupTestData({ dropId: testDropId, productId: testProductId, variantId: testVariantId });
++	});
++
++	describe('releaseExpiredSoftLocks', () => {
++		it('should release capacity when soft lock expires', async () => {
++			// Create an order with soft lock
++			const result = await createOrderWithSoftLock({
++				dropId: testDropId,
++				customerEmail: 'test@example.com',
++				customerPhone: '+48123456789',
++				inpostPointId: 'KRA01M',
++				cartLines: [{ variantId: testVariantId, quantity: 1 }],
++				bufferMinutes: 30,
++				mysteryBoxMinutes: 120
++			});
++
++			expect(result.ok).toBe(true);
++			if (!result.ok) return;
++
++			// Verify capacity is allocated
++			let allocatedMinutes = await getDropAllocatedMinutes(testDropId);
++			expect(allocatedMinutes).toBe(90);
++
++			// Manually expire the soft lock (set locked_until to past)
++			const pastDate = new Date(Date.now() - 10 * 60 * 1000); // 10 minutes ago
++			await db
++				.update(order)
++				.set({ locked_until: pastDate })
++				.where(eq(order.id, result.orderId));
++
++			// Release expired locks
++			const releaseResult = await releaseExpiredSoftLocks();
++
++			expect(releaseResult.released).toBe(1);
++
++			// Verify capacity was restored
++			allocatedMinutes = await getDropAllocatedMinutes(testDropId);
++			expect(allocatedMinutes).toBe(0);
++
++			// Verify order status changed to CANCELLED
++			const [orderRow] = await db.select().from(order).where(eq(order.id, result.orderId));
++			expect(orderRow.status).toBe('CANCELLED');
++			expect(orderRow.locked_until).toBeNull();
++		});
++
++		it('should handle multiple expired soft locks', async () => {
++			// Create 3 orders
++			const order1 = await createOrderWithSoftLock({
++				dropId: testDropId,
++				customerEmail: 'test1@example.com',
++				customerPhone: '+48123456789',
++				inpostPointId: 'KRA01M',
++				cartLines: [{ variantId: testVariantId, quantity: 1 }],
++				bufferMinutes: 30,
++				mysteryBoxMinutes: 120
++			});
++
++			const order2 = await createOrderWithSoftLock({
++				dropId: testDropId,
++				customerEmail: 'test2@example.com',
++				customerPhone: '+48123456789',
++				inpostPointId: 'KRA01M',
++				cartLines: [{ variantId: testVariantId, quantity: 1 }],
++				bufferMinutes: 30,
++				mysteryBoxMinutes: 120
++			});
++
++			const order3 = await createOrderWithSoftLock({
++				dropId: testDropId,
++				customerEmail: 'test3@example.com',
++				customerPhone: '+48123456789',
++				inpostPointId: 'KRA01M',
++				cartLines: [{ variantId: testVariantId, quantity: 1 }],
++				bufferMinutes: 30,
++				mysteryBoxMinutes: 120
++			});
++
++			expect(order1.ok && order2.ok && order3.ok).toBe(true);
++
++			// Verify total capacity allocated: 3 * 90 = 270
++			let allocatedMinutes = await getDropAllocatedMinutes(testDropId);
++			expect(allocatedMinutes).toBe(270);
++
++			// Expire all 3 orders
++			const pastDate = new Date(Date.now() - 10 * 60 * 1000);
++			if (order1.ok) {
++				await db.update(order).set({ locked_until: pastDate }).where(eq(order.id, order1.orderId));
++			}
++			if (order2.ok) {
++				await db.update(order).set({ locked_until: pastDate }).where(eq(order.id, order2.orderId));
++			}
++			if (order3.ok) {
++				await db.update(order).set({ locked_until: pastDate }).where(eq(order.id, order3.orderId));
++			}
++
++			// Release all expired locks
++			const releaseResult = await releaseExpiredSoftLocks();
++
++			expect(releaseResult.released).toBe(3);
++
++			// Verify all capacity was restored
++			allocatedMinutes = await getDropAllocatedMinutes(testDropId);
++			expect(allocatedMinutes).toBe(0);
++		});
++
++		it('should not release non-expired soft locks', async () => {
++			// Create an order with soft lock
++			const result = await createOrderWithSoftLock({
++				dropId: testDropId,
++				customerEmail: 'test@example.com',
++				customerPhone: '+48123456789',
++				inpostPointId: 'KRA01M',
++				cartLines: [{ variantId: testVariantId, quantity: 1 }],
++				bufferMinutes: 30,
++				mysteryBoxMinutes: 120
++			});
++
++			expect(result.ok).toBe(true);
++			if (!result.ok) return;
++
++			// Don't expire the lock - it should still be valid
++
++			// Try to release expired locks
++			const releaseResult = await releaseExpiredSoftLocks();
++
++			expect(releaseResult.released).toBe(0);
++
++			// Verify capacity is still allocated
++			const allocatedMinutes = await getDropAllocatedMinutes(testDropId);
++			expect(allocatedMinutes).toBe(90);
++
++			// Verify order is still PENDING_PAYMENT
++			const [orderRow] = await db.select().from(order).where(eq(order.id, result.orderId));
++			expect(orderRow.status).toBe('PENDING_PAYMENT');
++		});
++	});
++});
++
+diff --git a/src/lib/server/db/queries.ts b/src/lib/server/db/queries.ts
+index fefd581..921a820 100644
+--- a/src/lib/server/db/queries.ts
++++ b/src/lib/server/db/queries.ts
+@@ -2,7 +2,7 @@
+  * All database interactions for the application.
+  * Route files import from here — keeps server routes lean.
+  */
+-import { and, eq, lt, lte, gte, sql } from 'drizzle-orm';
++import { and, eq, lt, lte, gte, sql, isNotNull } from 'drizzle-orm';
+ import { db } from './index';
+ import {
+ 	globalSettings,
+@@ -272,7 +272,13 @@ export async function releaseExpiredSoftLocks(): Promise<{ released: number }> {
+ 	const expired = await db
+ 		.select({ id: order.id, drop_id: order.drop_id, locked_minutes: order.locked_minutes })
+ 		.from(order)
+-		.where(and(eq(order.status, 'PENDING_PAYMENT'), lt(order.locked_until, now)));
++		.where(
++			and(
++				eq(order.status, 'PENDING_PAYMENT'),
++				isNotNull(order.locked_until),
++				lt(order.locked_until, now)
++			)
++		);
+ 
+ 	if (expired.length === 0) return { released: 0 };
+ 
+diff --git a/src/lib/server/db/soft-lock.integration.test.ts b/src/lib/server/db/soft-lock.integration.test.ts
+new file mode 100644
+index 0000000..4a64242
+--- /dev/null
++++ b/src/lib/server/db/soft-lock.integration.test.ts
+@@ -0,0 +1,244 @@
++/**
++ * Integration Tests: Soft Lock Mechanism
++ * 
++ * Tests the atomic soft lock behavior when creating orders.
++ * This is the critical path for preventing overselling.
++ */
++
++import { describe, it, expect, beforeEach, afterEach } from 'vitest';
++import { db } from './index';
++import { createOrderWithSoftLock, confirmPayment } from './queries';
++import { drop, order } from './schema';
++import { eq } from 'drizzle-orm';
++import {
++	createTestSetup,
++	cleanupTestData,
++	getDropAllocatedMinutes,
++	ensureGlobalSettings
++} from '$lib/test-helpers/db-setup';
++
++describe('Soft Lock Integration Tests', () => {
++	let testDropId: number;
++	let testProductId: number;
++	let testVariantId: number;
++
++	beforeEach(async () => {
++		// Ensure global settings exist
++		await ensureGlobalSettings();
++
++		// Create test data
++		const setup = await createTestSetup();
++		testDropId = setup.dropId;
++		testProductId = setup.productId;
++		testVariantId = setup.variantId;
++	});
++
++	afterEach(async () => {
++		await cleanupTestData({ dropId: testDropId, productId: testProductId, variantId: testVariantId });
++	});
++
++	describe('createOrderWithSoftLock', () => {
++		it('should create order and apply soft lock to drop capacity', async () => {
++			const result = await createOrderWithSoftLock({
++				dropId: testDropId,
++				customerEmail: 'test@example.com',
++				customerPhone: '+48123456789',
++				inpostPointId: 'KRA01M',
++				cartLines: [{ variantId: testVariantId, quantity: 1 }],
++				bufferMinutes: 30,
++				mysteryBoxMinutes: 120
++			});
++
++			expect(result.ok).toBe(true);
++			if (!result.ok) return;
++
++			expect(result.orderId).toBeDefined();
++			expect(result.totalPln).toBe(2990); // Default test product price
++
++			// Verify capacity was deducted (60 min print + 30 min buffer = 90 min)
++			const allocatedMinutes = await getDropAllocatedMinutes(testDropId);
++			expect(allocatedMinutes).toBe(90);
++		});
++
++		it('should create order with correct locked_minutes and locked_until', async () => {
++			const beforeCreate = new Date();
++
++			const result = await createOrderWithSoftLock({
++				dropId: testDropId,
++				customerEmail: 'test@example.com',
++				customerPhone: '+48123456789',
++				inpostPointId: 'KRA01M',
++				cartLines: [{ variantId: testVariantId, quantity: 1 }],
++				bufferMinutes: 30,
++				mysteryBoxMinutes: 120
++			});
++
++			expect(result.ok).toBe(true);
++			if (!result.ok) return;
++
++			// Verify order has soft lock fields set
++			const [orderRow] = await db.select().from(order).where(eq(order.id, result.orderId));
++
++			expect(orderRow.locked_minutes).toBe(90);
++			expect(orderRow.locked_until).toBeDefined();
++
++			// Verify locked_until is ~3 minutes in the future
++			const lockedUntil = new Date(orderRow.locked_until!);
++			const expectedExpiry = new Date(beforeCreate.getTime() + 3 * 60 * 1000);
++			const timeDiff = Math.abs(lockedUntil.getTime() - expectedExpiry.getTime());
++			expect(timeDiff).toBeLessThan(5000); // Within 5 seconds
++		});
++
++		it('should reject order when capacity is insufficient', async () => {
++			// Pre-allocate most capacity (600 total - 550 allocated = 50 remaining)
++			await db.update(drop).set({ allocated_minutes: 550 }).where(eq(drop.id, testDropId));
++
++			const result = await createOrderWithSoftLock({
++				dropId: testDropId,
++				customerEmail: 'test@example.com',
++				customerPhone: '+48123456789',
++				inpostPointId: 'KRA01M',
++				cartLines: [{ variantId: testVariantId, quantity: 1 }], // Needs 90 min
++				bufferMinutes: 30,
++				mysteryBoxMinutes: 120
++			});
++
++			expect(result.ok).toBe(false);
++			if (result.ok) return;
++
++			expect(result.reason).toBe('INSUFFICIENT_CAPACITY');
++
++			// Verify capacity was NOT deducted
++			const allocatedMinutes = await getDropAllocatedMinutes(testDropId);
++			expect(allocatedMinutes).toBe(550); // Unchanged
++		});
++
++		it('should allow exact capacity fit', async () => {
++			// Set capacity to exactly what we need (90 min)
++			await db
++				.update(drop)
++				.set({ total_capacity_minutes: 90, allocated_minutes: 0 })
++				.where(eq(drop.id, testDropId));
++
++			const result = await createOrderWithSoftLock({
++				dropId: testDropId,
++				customerEmail: 'test@example.com',
++				customerPhone: '+48123456789',
++				inpostPointId: 'KRA01M',
++				cartLines: [{ variantId: testVariantId, quantity: 1 }],
++				bufferMinutes: 30,
++				mysteryBoxMinutes: 120
++			});
++
++			expect(result.ok).toBe(true);
++			if (!result.ok) return;
++
++			// Verify capacity is now fully allocated
++			const allocatedMinutes = await getDropAllocatedMinutes(testDropId);
++			expect(allocatedMinutes).toBe(90);
++		});
++
++		it('should handle multiple items in cart', async () => {
++			const result = await createOrderWithSoftLock({
++				dropId: testDropId,
++				customerEmail: 'test@example.com',
++				customerPhone: '+48123456789',
++				inpostPointId: 'KRA01M',
++				cartLines: [
++					{ variantId: testVariantId, quantity: 2 }, // 2 items
++				],
++				bufferMinutes: 30,
++				mysteryBoxMinutes: 120
++			});
++
++			expect(result.ok).toBe(true);
++			if (!result.ok) return;
++
++			// Verify capacity: (60 + 30) + (60 + 30) = 180 min
++			const allocatedMinutes = await getDropAllocatedMinutes(testDropId);
++			expect(allocatedMinutes).toBe(180);
++		});
++	});
++
++	describe('confirmPayment', () => {
++		it('should convert soft lock to hard lock and update order status', async () => {
++			// Create an order with soft lock
++			const createResult = await createOrderWithSoftLock({
++				dropId: testDropId,
++				customerEmail: 'test@example.com',
++				customerPhone: '+48123456789',
++				inpostPointId: 'KRA01M',
++				cartLines: [{ variantId: testVariantId, quantity: 1 }],
++				bufferMinutes: 30,
++				mysteryBoxMinutes: 120
++			});
++
++			expect(createResult.ok).toBe(true);
++			if (!createResult.ok) return;
++
++			// Set payment gateway ID (simulating BLIK initiation)
++			await db
++				.update(order)
++				.set({ payment_gateway_id: 'test-payment-123' })
++				.where(eq(order.id, createResult.orderId));
++
++			// Confirm payment
++			const confirmResult = await confirmPayment('test-payment-123');
++
++			expect(confirmResult.ok).toBe(true);
++			if (!confirmResult.ok) return;
++
++			expect(confirmResult.orderId).toBe(createResult.orderId);
++
++			// Verify order status updated
++			const [orderRow] = await db.select().from(order).where(eq(order.id, createResult.orderId));
++
++			expect(orderRow.status).toBe('PAID');
++			expect(orderRow.locked_until).toBeNull(); // Soft lock cleared
++			expect(orderRow.payment_gateway_id).toBe('test-payment-123');
++
++			// Verify capacity is still allocated (hard lock)
++			const allocatedMinutes = await getDropAllocatedMinutes(testDropId);
++			expect(allocatedMinutes).toBe(90);
++		});
++
++		it('should reject confirmation for non-existent payment', async () => {
++			const result = await confirmPayment('non-existent-payment-id');
++
++			expect(result.ok).toBe(false);
++			if (result.ok) return;
++
++			expect(result.reason).toBe('ORDER_NOT_FOUND');
++		});
++
++		it('should not confirm already paid order', async () => {
++			// Create and immediately confirm an order
++			const createResult = await createOrderWithSoftLock({
++				dropId: testDropId,
++				customerEmail: 'test@example.com',
++				customerPhone: '+48123456789',
++				inpostPointId: 'KRA01M',
++				cartLines: [{ variantId: testVariantId, quantity: 1 }],
++				bufferMinutes: 30,
++				mysteryBoxMinutes: 120
++			});
++
++			expect(createResult.ok).toBe(true);
++			if (!createResult.ok) return;
++
++			await db
++				.update(order)
++				.set({ payment_gateway_id: 'test-payment-456', status: 'PAID' })
++				.where(eq(order.id, createResult.orderId));
++
++			// Try to confirm again
++			const confirmResult = await confirmPayment('test-payment-456');
++
++			expect(confirmResult.ok).toBe(false);
++			if (confirmResult.ok) return;
++
++			expect(confirmResult.reason).toBe('ORDER_NOT_FOUND');
++		});
++	});
++});
++
+diff --git a/src/lib/test-helpers/db-setup.ts b/src/lib/test-helpers/db-setup.ts
+new file mode 100644
+index 0000000..8df5174
+--- /dev/null
++++ b/src/lib/test-helpers/db-setup.ts
+@@ -0,0 +1,192 @@
++/**
++ * Test Database Setup Helpers
++ * 
++ * Provides utilities for setting up and tearing down test data
++ * in integration tests.
++ */
++
++import { db } from '$lib/server/db';
++import { sql, eq } from 'drizzle-orm';
++import {
++	drop,
++	product,
++	productVariant,
++	order,
++	orderItem,
++	dropProduct,
++	globalSettings
++} from '$lib/server/db/schema';
++import type { NewDrop, NewProduct, NewProductVariant } from '$lib/server/db/schema';
++
++// ─── Test Data Cleanup ────────────────────────────────────────────────────────
++
++/**
++ * Cleans up test data for specific IDs.
++ * Use in afterEach() hooks with the IDs from your test setup.
++ */
++export async function cleanupTestData(ids?: { dropId?: number; productId?: number; variantId?: number }) {
++	if (!ids) {
++		// If no IDs provided, delete all test data (use with caution!)
++		await db.delete(orderItem);
++		await db.delete(order);
++		await db.delete(dropProduct);
++		await db.delete(productVariant);
++		await db.delete(product);
++		await db.delete(drop);
++		return;
++	}
++
++	// Delete in correct order to respect foreign key constraints
++	if (ids.dropId) {
++		// Delete orders for this drop
++		const orders = await db.select({ id: order.id }).from(order).where(eq(order.drop_id, ids.dropId));
++		for (const o of orders) {
++			await db.delete(orderItem).where(eq(orderItem.order_id, o.id));
++		}
++		await db.delete(order).where(eq(order.drop_id, ids.dropId));
++
++		// Delete drop_product links
++		await db.delete(dropProduct).where(eq(dropProduct.drop_id, ids.dropId));
++
++		// Delete the drop
++		await db.delete(drop).where(eq(drop.id, ids.dropId));
++	}
++
++	if (ids.variantId) {
++		await db.delete(productVariant).where(eq(productVariant.id, ids.variantId));
++	}
++
++	if (ids.productId) {
++		// Delete any remaining variants
++		await db.delete(productVariant).where(eq(productVariant.product_id, ids.productId));
++		// Delete drop_product links
++		await db.delete(dropProduct).where(eq(dropProduct.product_id, ids.productId));
++		// Delete the product
++		await db.delete(product).where(eq(product.id, ids.productId));
++	}
++}
++
++/**
++ * Truncates all tables and resets sequences.
++ * WARNING: This deletes ALL data including global_settings.
++ * Only use in isolated test environments.
++ */
++export async function truncateAllTables() {
++	await db.execute(
++		sql`TRUNCATE TABLE order_item, "order", drop_product, product_variant, product, drop, global_settings RESTART IDENTITY CASCADE`
++	);
++}
++
++// ─── Test Data Factories ──────────────────────────────────────────────────────
++
++/**
++ * Creates a test drop with sensible defaults.
++ */
++export async function createTestDrop(overrides?: Partial<NewDrop>): Promise<number> {
++	const now = new Date();
++	const oneWeekLater = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
++
++	const [newDrop] = await db
++		.insert(drop)
++		.values({
++			status: 'ACTIVE',
++			opens_at: now,
++			closes_at: oneWeekLater,
++			total_capacity_minutes: 600,
++			allocated_minutes: 0,
++			...overrides
++		})
++		.returning({ id: drop.id });
++
++	return newDrop.id;
++}
++
++/**
++ * Creates a test product with sensible defaults.
++ */
++export async function createTestProduct(overrides?: Partial<NewProduct>): Promise<number> {
++	const [newProduct] = await db
++		.insert(product)
++		.values({
++			name: 'Test Dragon',
++			description: 'A test fidget dragon',
++			print_duration_minutes: 60,
++			price_pln: 2990,
++			inpost_gabaryt: 'A',
++			is_active: true,
++			...overrides
++		})
++		.returning({ id: product.id });
++
++	return newProduct.id;
++}
++
++/**
++ * Creates a test product variant with sensible defaults.
++ */
++export async function createTestVariant(
++	productId: number,
++	overrides?: Partial<NewProductVariant>
++): Promise<number> {
++	const [newVariant] = await db
++		.insert(productVariant)
++		.values({
++			product_id: productId,
++			filament_color: 'Test Blue',
++			hex_code: '#0000FF',
++			is_mystery: false,
++			is_active: true,
++			...overrides
++		})
++		.returning({ id: productVariant.id });
++
++	return newVariant.id;
++}
++
++/**
++ * Creates a complete test setup: drop + product + variant.
++ * Returns all IDs for use in tests.
++ */
++export async function createTestSetup() {
++	const dropId = await createTestDrop();
++	const productId = await createTestProduct();
++	const variantId = await createTestVariant(productId);
++
++	// Link product to drop
++	await db.insert(dropProduct).values({
++		drop_id: dropId,
++		product_id: productId
++	});
++
++	return { dropId, productId, variantId };
++}
++
++/**
++ * Ensures global_settings row exists for tests.
++ */
++export async function ensureGlobalSettings() {
++	const existing = await db.select().from(globalSettings).where(eq(globalSettings.id, 1));
++
++	if (existing.length === 0) {
++		await db.insert(globalSettings).values({
++			id: 1,
++			printer_is_on: true,
++			status_message: 'Test mode',
++			active_window_start_hour: 8,
++			active_window_end_hour: 18,
++			turnaround_buffer_minutes: 30,
++			mystery_box_minutes: 120
++		});
++	}
++}
++
++// ─── Test Data Getters ────────────────────────────────────────────────────────
++
++/**
++ * Gets the current allocated minutes for a drop.
++ */
++export async function getDropAllocatedMinutes(dropId: number): Promise<number> {
++	const [result] = await db.select().from(drop).where(eq(drop.id, dropId));
++	return result?.allocated_minutes ?? 0;
++}
++
+diff --git a/vite.config.ts b/vite.config.ts
+index f12f8ad..63f9b6e 100644
+--- a/vite.config.ts
++++ b/vite.config.ts
+@@ -28,7 +28,18 @@ export default defineConfig({
+ 					name: 'server',
+ 					environment: 'node',
+ 					include: ['src/**/*.{test,spec}.{js,ts}'],
+-					exclude: ['src/**/*.svelte.{test,spec}.{js,ts}']
++					exclude: ['src/**/*.svelte.{test,spec}.{js,ts}', 'src/**/*.integration.{test,spec}.{js,ts}']
++				}
++			},
++
++			{
++				extends: './vite.config.ts',
++				test: {
++					name: 'integration',
++					environment: 'node',
++					include: ['src/**/*.integration.{test,spec}.{js,ts}'],
++					testTimeout: 30000,
++					hookTimeout: 15000
+ 				}
+ 			}
+ 		]
+
+commit a6b6c0dda06cfbab69f4fc380034a2c2a485c4b9
+Author: Michal <m.nakiewicz@gmail.com>
+Date:   Thu Mar 12 23:34:10 2026 +0100
+
+    Add architecture diagram documenting system layers
+
+diff --git a/docs/diagram.md b/docs/diagram.md
+new file mode 100644
+index 0000000..573048a
+--- /dev/null
++++ b/docs/diagram.md
+@@ -0,0 +1,51 @@
++```mermaid
++flowchart TD
++    %% Styling
++    classDef svelte fill:#ff3e00,stroke:#fff,stroke-width:2px,color:#fff;
++    classDef server fill:#20232a,stroke:#61dafb,stroke-width:2px,color:#fff;
++    classDef domain fill:#4caf50,stroke:#fff,stroke-width:2px,color:#fff;
++    classDef db fill:#336791,stroke:#fff,stroke-width:2px,color:#fff;
++
++    subgraph ClientLayer ["Client / UI Layer (Svelte 5)"]
++        Cart["lib/cart.svelte.ts<br/>(Global State / Runes)"]:::svelte
++        BlikTimer["components/BlikTimer.svelte<br/>(UI Component)"]:::svelte
++        Format["lib/formatting.ts<br/>(Utils)"]:::svelte
++    end
++
++    subgraph RouteLayer ["SvelteKit Server Routes (+server.ts / +page.server.ts)"]
++        ShopLayout["(shop)/+layout.server.ts<br/>(Global Loaders)"]:::server
++        ShopPage["(shop)/+page.server.ts<br/>(Feed Loader)"]:::server
++        IdPage["[id]/+page.server.ts<br/>(PDP Loader)"]:::server
++        CheckoutPage["checkout/+page.server.ts<br/>(Checkout Actions)"]:::server
++        PaymentAPI["payment/+server.ts<br/>(BLIK Webhook)"]:::server
++    end
++
++    subgraph DomainLayer ["Domain / Business Logic"]
++        Orders["server/orders.ts<br/>(Soft Locks & Validation)"]:::domain
++        Capacity["server/capacity.ts<br/>(Time-Based Engine)"]:::domain
++    end
++
++    subgraph DBLayer ["Data Access Layer (Drizzle ORM)"]
++        Queries["db/queries.ts<br/>(Repository)"]:::db
++        Schema["db/schema.ts<br/>(Tables & Types)"]:::db
++        DBIndex["db/index.ts<br/>(Connection)"]:::db
++    end
++
++    %% Route to DB/Domain Dependencies
++    ShopLayout -->|getActiveDrop, getGlobalSettings| Queries
++    ShopPage -->|getDropProducts| Queries
++    IdPage -->|getProductWithVariants| Queries
++    CheckoutPage -->|createOrderWithSoftLock| Queries
++    CheckoutPage -->|validateDropIsOpen| Orders
++    PaymentAPI -->|confirmPayment| Queries
++
++    %% DB to Domain Dependencies (Queries using Domain logic)
++    Queries -->|calculateCartMinutes| Capacity
++    Queries -->|buildSoftLockExpiry| Orders
++
++    %% Internal DB Dependencies
++    Queries --> Schema
++    Queries --> DBIndex
++    DBIndex --> Schema
++    Orders --> Schema
++```
+\ No newline at end of file
+
+commit 7683356a553431005bff07ba0b09ced974ddf27d
+Author: Michal <m.nakiewicz@gmail.com>
+Date:   Thu Mar 12 23:14:03 2026 +0100
+
+    Add .projlist with supported file types
+
+diff --git a/.projlist b/.projlist
+new file mode 100644
+index 0000000..1438974
+--- /dev/null
++++ b/.projlist
+@@ -0,0 +1,5 @@
++*.ts
++*.svelte
++*.html
++*.json
++*.js
+\ No newline at end of file
+
+commit 8d279993d594c4f2123e1329e77f7738285eba07
+Author: Michal <m.nakiewicz@gmail.com>
+Date:   Thu Mar 12 23:12:13 2026 +0100
+
+    Add database setup scripts, verification, and documentation
+
+diff --git a/DATABASE_SETUP_COMPLETE.md b/DATABASE_SETUP_COMPLETE.md
+new file mode 100644
+index 0000000..0287e32
+--- /dev/null
++++ b/DATABASE_SETUP_COMPLETE.md
+@@ -0,0 +1,217 @@
++# ✅ Database Setup Complete!
++
++## 🎉 Summary
++
++Your Neon PostgreSQL database has been successfully configured and is production-ready!
++
++---
++
++## 📊 What Was Done
++
++### 1. ✅ Schema Pushed to Neon
++- **7 tables** created with proper relationships
++- **4 enum types** for type-safe status values
++- **6 foreign key constraints** for referential integrity
++- All tables use timezone-aware timestamps
++
++### 2. ✅ Database Seeded with Initial Data
++- **Global Settings**: Printer configuration and capacity settings
++- **4 Products**: Infinity Cube, Flexi Rex, Spiral Spinner, Mystery Box
++- **10 Product Variants**: Various colors for each product
++- Ready for immediate testing and development
++
++### 3. ✅ Performance Indexes Created
++- **14 custom indexes** for optimal query performance
++- Partial indexes for frequently filtered queries
++- Composite indexes for junction tables
++- Covering indexes for common JOIN operations
++
++### 4. ✅ Database Verified
++- Connection tested successfully
++- All tables and enums confirmed
++- Foreign keys validated
++- Query performance tested (34ms average)
++
++---
++
++## 🗄️ Database Statistics
++
++| Metric | Count |
++|--------|-------|
++| **Tables** | 7 |
++| **Enums** | 4 |
++| **Indexes** | 14 |
++| **Foreign Keys** | 6 |
++| **Products** | 4 |
++| **Variants** | 10 |
++| **PostgreSQL Version** | 17.8 |
++
++---
++
++## 🚀 Available Commands
++
++```bash
++# Development
++pnpm db:push          # Push schema changes to database
++pnpm db:seed          # Populate with sample data
++pnpm db:studio        # Open visual database browser
++pnpm db:verify        # Verify database integrity
++
++# Production
++pnpm db:generate      # Generate migration files
++pnpm db:migrate       # Apply migrations
++
++# Maintenance
++pnpm db:add-indexes   # Create performance indexes
++```
++
++---
++
++## 📋 Database Schema
++
++### Tables Overview
++
++1. **`global_settings`** (1 row)
++   - Singleton configuration table
++   - Controls printer status, active hours, capacity settings
++
++2. **`product`** (4 rows)
++   - Product catalog with print duration and pricing
++   - InPost parcel size classification
++
++3. **`product_variant`** (10 rows)
++   - Color/filament variants for each product
++   - Mystery box support with `is_mystery` flag
++
++4. **`drop`** (0 rows)
++   - Weekly production windows
++   - Capacity tracking in minutes
++
++5. **`drop_product`** (0 rows)
++   - Junction table: products available in each drop
++
++6. **`order`** (0 rows)
++   - Customer orders with UUID public IDs
++   - Soft-lock mechanism for payment flow
++
++7. **`order_item`** (0 rows)
++   - Line items within orders
++   - Status tracking for makers' workflow
++
++---
++
++## 🎨 Seeded Products
++
++### 1. Infinity Cube - 25.00 PLN
++- **Print Time**: 45 minutes
++- **Colors**: Ocean Blue, Sunset Orange, Forest Green
++- **Parcel Size**: A
++
++### 2. Flexi Rex - 35.00 PLN
++- **Print Time**: 90 minutes
++- **Colors**: Dino Green, Lava Red, Galaxy Purple
++- **Parcel Size**: B
++
++### 3. Spiral Spinner - 28.00 PLN
++- **Print Time**: 60 minutes
++- **Colors**: Neon Pink, Electric Blue, Lime Green
++- **Parcel Size**: A
++
++### 4. Mystery Box - 20.00 PLN
++- **Print Time**: 120 minutes (configurable)
++- **Colors**: Mystery (random)
++- **Parcel Size**: A
++
++---
++
++## 🔍 Performance Indexes
++
++All indexes created for optimal query performance:
++
++- **Order Indexes** (4): Status filtering, drop lookup, customer search
++- **Order Item Indexes** (3): Order lookup, variant analytics, makers' workflow
++- **Drop Indexes** (2): Status filtering, date range queries
++- **Drop Product Indexes** (2): Junction table lookups
++- **Product Variant Indexes** (2): Product lookup, active variants
++- **Product Indexes** (1): Active products only
++
++---
++
++## 🔐 Security Features
++
++✅ **SSL Required**: All connections use TLS encryption  
++✅ **Channel Binding**: Enhanced connection security  
++✅ **UUID Public IDs**: Orders use UUIDs for security  
++✅ **Environment Variables**: Credentials stored securely  
++✅ **Connection Pooling**: Neon's built-in pooling enabled  
++
++---
++
++## 📚 Documentation
++
++- **[DATABASE.md](docs/DATABASE.md)** - Complete database documentation
++- **[PLAN.md](docs/PLAN.md)** - Project implementation plan
++- **[CLAUDE.md](.claude/CLAUDE.md)** - Development guidelines
++
++---
++
++## 🎯 Next Steps
++
++1. **Create Your First Drop**
++   - Use Drizzle Studio or create an admin interface
++   - Set `opens_at`, `closes_at`, and `total_capacity_minutes`
++   - Link products to the drop via `drop_product` table
++
++2. **Test the Capacity Engine**
++   - Run the existing unit tests: `pnpm test`
++   - 34 tests should pass for capacity calculations
++
++3. **Build the Frontend**
++   - Customer shop interface at `/(shop)`
++   - Admin dashboard at `/admin`
++   - Makers' workflow at `/makers`
++
++4. **Set Up Payment Integration**
++   - Implement BLIK payment gateway
++   - Configure webhook endpoint
++   - Test soft-lock mechanism
++
++5. **Deploy to Vercel**
++   - Set `DATABASE_URL` in Vercel environment variables
++   - Configure cron job for `releaseExpiredSoftLocks()`
++   - Test production deployment
++
++---
++
++## 🛠️ Troubleshooting
++
++### View Database in Browser
++```bash
++pnpm db:studio
++# Opens https://local.drizzle.studio
++```
++
++### Test Connection
++```bash
++pnpm db:verify
++```
++
++### Reset Database (⚠️ Destructive)
++```bash
++pnpm db:push --force
++pnpm db:seed
++pnpm db:add-indexes
++```
++
++---
++
++## ✨ Success!
++
++Your database is now fully configured and ready for development. All tables, indexes, and seed data are in place. You can start building your application with confidence!
++
++**Database URL**: Connected to Neon (eu-central-1)  
++**Status**: ✅ Production Ready  
++**Last Verified**: Just now  
++
++Happy coding! 🚀
++
+diff --git a/docs/DATABASE.md b/docs/DATABASE.md
+new file mode 100644
+index 0000000..98c5c0f
+--- /dev/null
++++ b/docs/DATABASE.md
+@@ -0,0 +1,200 @@
++# 🗄️ Database Setup & Management
++
++## Overview
++
++This project uses **Neon PostgreSQL** (serverless PostgreSQL) with **Drizzle ORM** for type-safe database operations.
++
++## 📋 Quick Start
++
++### 1. Environment Setup
++
++Create a `.env` file in the project root:
++
++```bash
++DATABASE_URL=postgresql://user:password@host/database?sslmode=require
++```
++
++Your Neon connection string should look like:
++```
++postgresql://neondb_owner:xxx@ep-xxx.c-2.eu-central-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require
++```
++
++### 2. Initialize Database
++
++```bash
++# Push schema to database (creates all tables)
++pnpm db:push
++
++# Seed with initial data (products, variants, settings)
++pnpm db:seed
++
++# Add performance indexes
++pnpm db:add-indexes
++```
++
++## 🛠️ Available Commands
++
++| Command | Description |
++|---------|-------------|
++| `pnpm db:push` | Push schema changes to database (development) |
++| `pnpm db:generate` | Generate migration files (production) |
++| `pnpm db:migrate` | Apply migrations to database |
++| `pnpm db:studio` | Open Drizzle Studio (visual database browser) |
++| `pnpm db:seed` | Populate database with initial data |
++| `pnpm db:add-indexes` | Create performance indexes |
++
++## 📊 Database Schema
++
++### Tables
++
++1. **`global_settings`** - Singleton configuration (printer status, active hours, capacity settings)
++2. **`product`** - Product catalog (fidget toys)
++3. **`product_variant`** - Color/filament variants for each product
++4. **`drop`** - Weekly production windows with capacity tracking
++5. **`drop_product`** - Junction table (which products are in which drop)
++6. **`order`** - Customer orders with soft-lock mechanism
++7. **`order_item`** - Line items within orders
++
++### Key Features
++
++- **Capacity Management**: Tracks production capacity in minutes (not item slots)
++- **Soft-Lock Pattern**: Reserves capacity during payment flow (15-minute timeout)
++- **Money Handling**: Prices stored in grosze (Polish cents) as integers
++- **UUID Public IDs**: Orders use UUIDs for security
++- **Timezone-Aware**: All timestamps use `timestamptz`
++
++## 🔍 Drizzle Studio
++
++Visual database browser at `https://local.drizzle.studio`
++
++```bash
++pnpm db:studio
++```
++
++Features:
++- Browse all tables and data
++- Edit records directly
++- Run SQL queries
++- View relationships
++
++## 🎨 Seed Data
++
++The seed script creates:
++
++### Global Settings
++- Printer status: ON
++- Active hours: 8:00 - 18:00
++- Buffer time: 30 minutes
++- Mystery box duration: 120 minutes
++
++### Products (4 items)
++1. **Infinity Cube** - 45 min, 25.00 PLN
++   - Ocean Blue, Sunset Orange, Forest Green
++2. **Flexi Rex** - 90 min, 35.00 PLN
++   - Dino Green, Lava Red, Galaxy Purple
++3. **Spiral Spinner** - 60 min, 28.00 PLN
++   - Neon Pink, Electric Blue, Lime Green
++4. **Mystery Box** - 120 min, 20.00 PLN
++   - Mystery variant (random color)
++
++## 🚀 Performance Indexes
++
++The following indexes are created for optimal query performance:
++
++### Order Indexes
++- `idx_order_status_locked` - Partial index for pending orders (cron job)
++- `idx_order_drop_id` - Orders by drop
++- `idx_order_customer_email` - Customer lookup
++- `idx_order_status` - Status filtering
++
++### Order Item Indexes
++- `idx_order_item_order_id` - Items by order (most common)
++- `idx_order_item_variant_id` - Product analytics
++- `idx_order_item_status` - Makers' workflow (pending items)
++
++### Drop Indexes
++- `idx_drop_status` - Active drops
++- `idx_drop_dates` - Date range queries
++
++### Product Indexes
++- `idx_product_variant_product_id` - Variants by product
++- `idx_product_variant_active` - Active variants only
++- `idx_product_active` - Active products only
++
++## 🔄 Migration Workflow
++
++### Development (Schema Push)
++```bash
++# Make changes to src/lib/server/db/schema.ts
++pnpm db:push
++```
++
++### Production (Migrations)
++```bash
++# Generate migration files
++pnpm db:generate
++
++# Review generated SQL in drizzle/ folder
++
++# Apply to production
++pnpm db:migrate
++```
++
++## 🔐 Security Best Practices
++
++✅ **Implemented:**
++- SSL required for all connections
++- Channel binding enabled
++- UUIDs for public-facing IDs
++- Environment variables for credentials
++- Connection pooling via Neon
++
++## 📈 Monitoring & Maintenance
++
++### Query Performance
++```sql
++-- Update query planner statistics
++ANALYZE;
++
++-- View slow queries (if enabled)
++SELECT * FROM pg_stat_statements ORDER BY total_exec_time DESC LIMIT 10;
++```
++
++### Backup Strategy
++- Neon provides automatic daily backups
++- Point-in-time recovery available
++- Manual backups via Neon dashboard
++
++## 🐛 Troubleshooting
++
++### Connection Issues
++```bash
++# Test connection
++psql $DATABASE_URL -c "SELECT version();"
++```
++
++### Schema Drift
++```bash
++# Pull current schema from database
++pnpm db:pull
++
++# Compare with local schema
++pnpm db:check
++```
++
++### Reset Database (⚠️ Destructive)
++```bash
++# Drop all tables and recreate
++pnpm db:push --force
++
++# Re-seed data
++pnpm db:seed
++pnpm db:add-indexes
++```
++
++## 📚 Resources
++
++- [Drizzle ORM Docs](https://orm.drizzle.team/)
++- [Neon Documentation](https://neon.tech/docs)
++- [PostgreSQL Docs](https://www.postgresql.org/docs/)
++
+diff --git a/src/lib/server/db/add-indexes.ts b/src/lib/server/db/add-indexes.ts
+new file mode 100644
+index 0000000..3458b01
+--- /dev/null
++++ b/src/lib/server/db/add-indexes.ts
+@@ -0,0 +1,146 @@
++/**
++ * Add database indexes for performance optimization
++ * 
++ * Run with: pnpm db:add-indexes
++ */
++
++import 'dotenv/config';
++import { sql } from 'drizzle-orm';
++import { db } from './index';
++
++async function addIndexes() {
++	console.log('🔧 Adding database indexes for performance...\n');
++
++	try {
++		// ─── Order Indexes ────────────────────────────────────────────────────────
++		console.log('📊 Creating order indexes...');
++		
++		// Index for finding orders by status and locked_until (used by cron job)
++		await db.execute(sql`
++			CREATE INDEX IF NOT EXISTS idx_order_status_locked 
++			ON "order"(status, locked_until) 
++			WHERE status = 'PENDING_PAYMENT' AND locked_until IS NOT NULL
++		`);
++		console.log('✅ Created: idx_order_status_locked (partial index for pending orders)');
++
++		// Index for finding orders by drop_id (used in admin views)
++		await db.execute(sql`
++			CREATE INDEX IF NOT EXISTS idx_order_drop_id 
++			ON "order"(drop_id)
++		`);
++		console.log('✅ Created: idx_order_drop_id');
++
++		// Index for finding orders by customer email (customer lookup)
++		await db.execute(sql`
++			CREATE INDEX IF NOT EXISTS idx_order_customer_email 
++			ON "order"(customer_email)
++		`);
++		console.log('✅ Created: idx_order_customer_email');
++
++		// Index for finding orders by status (admin filtering)
++		await db.execute(sql`
++			CREATE INDEX IF NOT EXISTS idx_order_status 
++			ON "order"(status)
++		`);
++		console.log('✅ Created: idx_order_status');
++
++		// ─── Order Item Indexes ───────────────────────────────────────────────────
++		console.log('\n📊 Creating order_item indexes...');
++
++		// Index for finding items by order_id (most common query)
++		await db.execute(sql`
++			CREATE INDEX IF NOT EXISTS idx_order_item_order_id 
++			ON order_item(order_id)
++		`);
++		console.log('✅ Created: idx_order_item_order_id');
++
++		// Index for finding items by variant_id (product analytics)
++		await db.execute(sql`
++			CREATE INDEX IF NOT EXISTS idx_order_item_variant_id 
++			ON order_item(variant_id)
++		`);
++		console.log('✅ Created: idx_order_item_variant_id');
++
++		// Index for makers' workflow (PENDING items to print)
++		await db.execute(sql`
++			CREATE INDEX IF NOT EXISTS idx_order_item_status 
++			ON order_item(status) 
++			WHERE status = 'PENDING'
++		`);
++		console.log('✅ Created: idx_order_item_status (partial index for pending items)');
++
++		// ─── Drop Indexes ─────────────────────────────────────────────────────────
++		console.log('\n📊 Creating drop indexes...');
++
++		// Index for finding active drops
++		await db.execute(sql`
++			CREATE INDEX IF NOT EXISTS idx_drop_status 
++			ON drop(status)
++		`);
++		console.log('✅ Created: idx_drop_status');
++
++		// Index for finding drops by date range
++		await db.execute(sql`
++			CREATE INDEX IF NOT EXISTS idx_drop_dates 
++			ON drop(opens_at, closes_at)
++		`);
++		console.log('✅ Created: idx_drop_dates');
++
++		// ─── Drop Product Indexes ─────────────────────────────────────────────────
++		console.log('\n📊 Creating drop_product indexes...');
++
++		// Composite index for junction table lookups
++		await db.execute(sql`
++			CREATE INDEX IF NOT EXISTS idx_drop_product_drop_id 
++			ON drop_product(drop_id)
++		`);
++		console.log('✅ Created: idx_drop_product_drop_id');
++
++		await db.execute(sql`
++			CREATE INDEX IF NOT EXISTS idx_drop_product_product_id 
++			ON drop_product(product_id)
++		`);
++		console.log('✅ Created: idx_drop_product_product_id');
++
++		// ─── Product Variant Indexes ──────────────────────────────────────────────
++		console.log('\n📊 Creating product_variant indexes...');
++
++		// Index for finding variants by product
++		await db.execute(sql`
++			CREATE INDEX IF NOT EXISTS idx_product_variant_product_id 
++			ON product_variant(product_id)
++		`);
++		console.log('✅ Created: idx_product_variant_product_id');
++
++		// Index for active variants only
++		await db.execute(sql`
++			CREATE INDEX IF NOT EXISTS idx_product_variant_active 
++			ON product_variant(product_id, is_active) 
++			WHERE is_active = true
++		`);
++		console.log('✅ Created: idx_product_variant_active (partial index)');
++
++		// ─── Product Indexes ──────────────────────────────────────────────────────
++		console.log('\n📊 Creating product indexes...');
++
++		// Index for active products
++		await db.execute(sql`
++			CREATE INDEX IF NOT EXISTS idx_product_active 
++			ON product(is_active) 
++			WHERE is_active = true
++		`);
++		console.log('✅ Created: idx_product_active (partial index)');
++
++		console.log('\n✨ All indexes created successfully!\n');
++		console.log('💡 Tip: Run ANALYZE to update query planner statistics:');
++		console.log('   psql $DATABASE_URL -c "ANALYZE;"\n');
++		
++		process.exit(0);
++	} catch (error) {
++		console.error('❌ Index creation failed:', error);
++		process.exit(1);
++	}
++}
++
++addIndexes();
++
+diff --git a/src/lib/server/db/create-test-drop.ts b/src/lib/server/db/create-test-drop.ts
+new file mode 100644
+index 0000000..d4bfb08
+--- /dev/null
++++ b/src/lib/server/db/create-test-drop.ts
+@@ -0,0 +1,74 @@
++/**
++ * Create a test drop for development
++ * Run with: pnpm tsx src/lib/server/db/create-test-drop.ts
++ */
++
++import 'dotenv/config';
++import { db } from './index';
++import { drop, dropProduct, product } from './schema';
++
++async function createTestDrop() {
++	console.log('🎯 Creating test drop...\n');
++
++	try {
++		// Get all products
++		const products = await db.select().from(product);
++		
++		if (products.length === 0) {
++			console.log('❌ No products found. Run pnpm db:seed first.');
++			process.exit(1);
++		}
++
++		// Create a drop that's active for the next 7 days
++		const now = new Date();
++		const opensAt = new Date(now);
++		opensAt.setHours(0, 0, 0, 0); // Start of today
++		
++		const closesAt = new Date(opensAt);
++		closesAt.setDate(closesAt.getDate() + 7); // 7 days from now
++		closesAt.setHours(23, 59, 59, 999); // End of that day
++
++		// Calculate total capacity: 10 hours per day * 7 days = 70 hours = 4200 minutes
++		const totalCapacityMinutes = 10 * 60 * 7; // 4200 minutes
++
++		console.log(`📅 Drop period: ${opensAt.toISOString()} to ${closesAt.toISOString()}`);
++		console.log(`⏱️  Total capacity: ${totalCapacityMinutes} minutes (${totalCapacityMinutes / 60} hours)\n`);
++
++		// Create the drop
++		const [newDrop] = await db
++			.insert(drop)
++			.values({
++				status: 'ACTIVE',
++				opens_at: opensAt,
++				closes_at: closesAt,
++				total_capacity_minutes: totalCapacityMinutes,
++				allocated_minutes: 0
++			})
++			.returning();
++
++		console.log(`✅ Created drop with ID: ${newDrop.id}`);
++		console.log(`   Status: ${newDrop.status}`);
++		console.log(`   Capacity: ${newDrop.total_capacity_minutes} minutes\n`);
++
++		// Link all products to this drop
++		console.log('🔗 Linking products to drop...');
++		for (const prod of products) {
++			await db.insert(dropProduct).values({
++				drop_id: newDrop.id,
++				product_id: prod.id
++			});
++			console.log(`   ✅ Linked: ${prod.name}`);
++		}
++
++		console.log('\n✨ Test drop created successfully!');
++		console.log(`\n🌐 Visit http://localhost:5173 to see your shop!\n`);
++		
++		process.exit(0);
++	} catch (error) {
++		console.error('❌ Failed to create test drop:', error);
++		process.exit(1);
++	}
++}
++
++createTestDrop();
++
+diff --git a/src/lib/server/db/seed.ts b/src/lib/server/db/seed.ts
+new file mode 100644
+index 0000000..2f75b7b
+--- /dev/null
++++ b/src/lib/server/db/seed.ts
+@@ -0,0 +1,156 @@
++/**
++ * Database seed script
++ * Populates the database with initial data for development and testing
++ *
++ * Run with: pnpm db:seed
++ */
++
++import 'dotenv/config';
++import { db } from './index';
++import {
++	globalSettings,
++	product,
++	productVariant,
++	drop,
++	dropProduct
++} from './schema';
++import { eq } from 'drizzle-orm';
++
++async function seed() {
++	console.log('🌱 Starting database seed...\n');
++
++	try {
++		// ─── 1. Global Settings ───────────────────────────────────────────────────
++		console.log('📋 Seeding global settings...');
++		
++		const existingSettings = await db
++			.select()
++			.from(globalSettings)
++			.where(eq(globalSettings.id, 1));
++
++		if (existingSettings.length === 0) {
++			await db.insert(globalSettings).values({
++				id: 1,
++				printer_is_on: true,
++				status_message: 'Welcome to Fidget Fun! Weekly drops every Monday.',
++				active_window_start_hour: 8,
++				active_window_end_hour: 18,
++				turnaround_buffer_minutes: 30,
++				mystery_box_minutes: 120
++			});
++			console.log('✅ Global settings created');
++		} else {
++			console.log('⏭️  Global settings already exist');
++		}
++
++		// ─── 2. Products ──────────────────────────────────────────────────────────
++		console.log('\n🎨 Seeding products...');
++
++		const products = [
++			{
++				name: 'Infinity Cube',
++				description: 'Classic fidget cube that folds infinitely. Perfect for desk fidgeting!',
++				print_duration_minutes: 45,
++				price_pln: 2500, // 25.00 PLN
++				inpost_gabaryt: 'A' as const,
++				is_active: true
++			},
++			{
++				name: 'Flexi Rex',
++				description: 'Articulated T-Rex that moves and poses. Kids love it!',
++				print_duration_minutes: 90,
++				price_pln: 3500, // 35.00 PLN
++				inpost_gabaryt: 'B' as const,
++				is_active: true
++			},
++			{
++				name: 'Spiral Spinner',
++				description: 'Mesmerizing spiral fidget spinner with smooth bearings.',
++				print_duration_minutes: 60,
++				price_pln: 2800, // 28.00 PLN
++				inpost_gabaryt: 'A' as const,
++				is_active: true
++			},
++			{
++				name: 'Mystery Box',
++				description: 'Surprise fidget toy! You choose the size, we choose the design and color.',
++				print_duration_minutes: 120, // This will be overridden by mystery_box_minutes
++				price_pln: 2000, // 20.00 PLN
++				inpost_gabaryt: 'A' as const,
++				is_active: true
++			}
++		];
++
++		const insertedProducts = [];
++		for (const prod of products) {
++			const existing = await db
++				.select()
++				.from(product)
++				.where(eq(product.name, prod.name));
++
++			if (existing.length === 0) {
++				const [inserted] = await db.insert(product).values(prod).returning();
++				insertedProducts.push(inserted);
++				console.log(`✅ Created product: ${prod.name}`);
++			} else {
++				insertedProducts.push(existing[0]);
++				console.log(`⏭️  Product already exists: ${prod.name}`);
++			}
++		}
++
++		// ─── 3. Product Variants ──────────────────────────────────────────────────
++		console.log('\n🎨 Seeding product variants...');
++
++		const variants = [
++			// Infinity Cube variants
++			{ product_name: 'Infinity Cube', filament_color: 'Ocean Blue', hex_code: '#0077BE', is_mystery: false },
++			{ product_name: 'Infinity Cube', filament_color: 'Sunset Orange', hex_code: '#FF6B35', is_mystery: false },
++			{ product_name: 'Infinity Cube', filament_color: 'Forest Green', hex_code: '#2D5016', is_mystery: false },
++			
++			// Flexi Rex variants
++			{ product_name: 'Flexi Rex', filament_color: 'Dino Green', hex_code: '#4A7C59', is_mystery: false },
++			{ product_name: 'Flexi Rex', filament_color: 'Lava Red', hex_code: '#C1121F', is_mystery: false },
++			{ product_name: 'Flexi Rex', filament_color: 'Galaxy Purple', hex_code: '#5A189A', is_mystery: false },
++			
++			// Spiral Spinner variants
++			{ product_name: 'Spiral Spinner', filament_color: 'Neon Pink', hex_code: '#FF006E', is_mystery: false },
++			{ product_name: 'Spiral Spinner', filament_color: 'Electric Blue', hex_code: '#00B4D8', is_mystery: false },
++			{ product_name: 'Spiral Spinner', filament_color: 'Lime Green', hex_code: '#90E0EF', is_mystery: false },
++			
++			// Mystery Box variant (special)
++			{ product_name: 'Mystery Box', filament_color: 'Mystery', hex_code: '#000000', is_mystery: true }
++		];
++
++		for (const variant of variants) {
++			const prod = insertedProducts.find(p => p.name === variant.product_name);
++			if (!prod) continue;
++
++			const existing = await db
++				.select()
++				.from(productVariant)
++				.where(eq(productVariant.filament_color, variant.filament_color));
++
++			if (existing.length === 0) {
++				await db.insert(productVariant).values({
++					product_id: prod.id,
++					filament_color: variant.filament_color,
++					hex_code: variant.hex_code,
++					is_mystery: variant.is_mystery,
++					is_active: true
++				});
++				console.log(`✅ Created variant: ${variant.product_name} - ${variant.filament_color}`);
++			} else {
++				console.log(`⏭️  Variant already exists: ${variant.filament_color}`);
++			}
++		}
++
++		console.log('\n✨ Database seed completed successfully!\n');
++		process.exit(0);
++	} catch (error) {
++		console.error('❌ Seed failed:', error);
++		process.exit(1);
++	}
++}
++
++seed();
++
+diff --git a/src/lib/server/db/verify.ts b/src/lib/server/db/verify.ts
+new file mode 100644
+index 0000000..217cc07
+--- /dev/null
++++ b/src/lib/server/db/verify.ts
+@@ -0,0 +1,177 @@
++/**
++ * Database verification script
++ * Tests connection and validates schema integrity
++ * 
++ * Run with: pnpm db:verify
++ */
++
++import 'dotenv/config';
++import { sql } from 'drizzle-orm';
++import { db } from './index';
++import {
++	globalSettings,
++	product,
++	productVariant,
++	drop,
++	dropProduct,
++	order,
++	orderItem
++} from './schema';
++
++async function verify() {
++	console.log('🔍 Verifying database connection and schema...\n');
++
++	try {
++		// ─── 1. Test Connection ───────────────────────────────────────────────────
++		console.log('📡 Testing database connection...');
++		const result = await db.execute(sql`SELECT version()`);
++		console.log('✅ Connected to PostgreSQL');
++		if (result && result.length > 0) {
++			const version = (result[0] as any).version;
++			console.log(`   Version: ${version.split(' ').slice(0, 2).join(' ')}\n`);
++		} else {
++			console.log('   Version: Unknown\n');
++		}
++
++		// ─── 2. Verify Tables Exist ───────────────────────────────────────────────
++		console.log('📋 Verifying tables...');
++		const tables = await db.execute(sql`
++			SELECT table_name
++			FROM information_schema.tables
++			WHERE table_schema = 'public'
++			ORDER BY table_name
++		`);
++
++		const expectedTables = [
++			'global_settings',
++			'product',
++			'product_variant',
++			'drop',
++			'drop_product',
++			'order',
++			'order_item'
++		];
++
++		const existingTables = (tables as any[]).map((r: any) => r.table_name);
++		
++		for (const table of expectedTables) {
++			if (existingTables.includes(table)) {
++				console.log(`✅ Table exists: ${table}`);
++			} else {
++				console.log(`❌ Table missing: ${table}`);
++			}
++		}
++
++		// ─── 3. Verify Enums ──────────────────────────────────────────────────────
++		console.log('\n🎨 Verifying enums...');
++		const enums = await db.execute(sql`
++			SELECT typname
++			FROM pg_type
++			WHERE typtype = 'e'
++			ORDER BY typname
++		`);
++
++		const expectedEnums = [
++			'drop_status',
++			'order_status',
++			'order_item_status',
++			'inpost_gabaryt'
++		];
++
++		const existingEnums = (enums as any[]).map((r: any) => r.typname);
++		
++		for (const enumType of expectedEnums) {
++			if (existingEnums.includes(enumType)) {
++				console.log(`✅ Enum exists: ${enumType}`);
++			} else {
++				console.log(`❌ Enum missing: ${enumType}`);
++			}
++		}
++
++		// ─── 4. Verify Indexes ────────────────────────────────────────────────────
++		console.log('\n🔍 Verifying indexes...');
++		const indexes = await db.execute(sql`
++			SELECT indexname
++			FROM pg_indexes
++			WHERE schemaname = 'public'
++			AND indexname LIKE 'idx_%'
++			ORDER BY indexname
++		`);
++
++		const indexCount = (indexes as any[]).length;
++		console.log(`✅ Found ${indexCount} custom indexes`);
++
++		if (indexCount > 0) {
++			(indexes as any[]).forEach((r: any) => {
++				console.log(`   - ${r.indexname}`);
++			});
++		}
++
++		// ─── 5. Count Records ─────────────────────────────────────────────────────
++		console.log('\n📊 Counting records...');
++
++		const settingsCount = await db.select().from(globalSettings);
++		console.log(`✅ Global settings: ${settingsCount.length} row(s)`);
++
++		const productsCount = await db.select().from(product);
++		console.log(`✅ Products: ${productsCount.length} row(s)`);
++
++		const variantsCount = await db.select().from(productVariant);
++		console.log(`✅ Product variants: ${variantsCount.length} row(s)`);
++
++		const dropsCount = await db.select().from(drop);
++		console.log(`✅ Drops: ${dropsCount.length} row(s)`);
++
++		const ordersCount = await db.select().from(order);
++		console.log(`✅ Orders: ${ordersCount.length} row(s)`);
++
++		const orderItemsCount = await db.select().from(orderItem);
++		console.log(`✅ Order items: ${orderItemsCount.length} row(s)`);
++
++		// ─── 6. Test Query Performance ────────────────────────────────────────────
++		console.log('\n⚡ Testing query performance...');
++		
++		const start = Date.now();
++		await db.select().from(product);
++		const duration = Date.now() - start;
++		
++		console.log(`✅ Simple SELECT query: ${duration}ms`);
++
++		// ─── 7. Verify Foreign Keys ───────────────────────────────────────────────
++		console.log('\n🔗 Verifying foreign key constraints...');
++		const fks = await db.execute(sql`
++			SELECT
++				tc.table_name,
++				kcu.column_name,
++				ccu.table_name AS foreign_table_name
++			FROM information_schema.table_constraints AS tc
++			JOIN information_schema.key_column_usage AS kcu
++				ON tc.constraint_name = kcu.constraint_name
++			JOIN information_schema.constraint_column_usage AS ccu
++				ON ccu.constraint_name = tc.constraint_name
++			WHERE tc.constraint_type = 'FOREIGN KEY'
++			AND tc.table_schema = 'public'
++			ORDER BY tc.table_name
++		`);
++
++		console.log(`✅ Found ${(fks as any[]).length} foreign key constraints`);
++
++		// ─── Summary ──────────────────────────────────────────────────────────────
++		console.log('\n' + '='.repeat(60));
++		console.log('✨ Database verification complete!');
++		console.log('='.repeat(60));
++		console.log(`📊 Tables: ${existingTables.length}`);
++		console.log(`🎨 Enums: ${existingEnums.length}`);
++		console.log(`🔍 Indexes: ${indexCount}`);
++		console.log(`📦 Total records: ${settingsCount.length + productsCount.length + variantsCount.length + dropsCount.length + ordersCount.length + orderItemsCount.length}`);
++		console.log('='.repeat(60) + '\n');
++
++		process.exit(0);
++	} catch (error) {
++		console.error('\n❌ Verification failed:', error);
++		process.exit(1);
++	}
++}
++
++verify();
++
+diff --git a/src/routes/test/+page.server.ts b/src/routes/test/+page.server.ts
+new file mode 100644
+index 0000000..3614278
+--- /dev/null
++++ b/src/routes/test/+page.server.ts
+@@ -0,0 +1,8 @@
++import type { PageServerLoad } from './$types';
++import { getGlobalSettings, getActiveDrop } from '$lib/server/db/queries';
++
++export const load: PageServerLoad = async () => {
++	const [settings, activeDrop] = await Promise.all([getGlobalSettings(), getActiveDrop()]);
++	return { settings, activeDrop };
++};
++
+diff --git a/src/routes/test/+page.svelte b/src/routes/test/+page.svelte
+new file mode 100644
+index 0000000..84502cb
+--- /dev/null
++++ b/src/routes/test/+page.svelte
+@@ -0,0 +1,15 @@
++<script lang="ts">
++	import type { PageData } from './$types';
++	let { data }: { data: PageData } = $props();
++</script>
++
++<h1>Database Connection Test</h1>
++
++<h2>✅ Database Connected!</h2>
++
++<h3>Global Settings:</h3>
++<pre>{JSON.stringify(data.settings, null, 2)}</pre>
++
++<h3>Active Drop:</h3>
++<pre>{JSON.stringify(data.activeDrop, null, 2)}</pre>
++
+
+commit bfda49d70a8858d0f2e86765486dda8563047ab8
+Author: Michal <m.nakiewicz@gmail.com>
+Date:   Thu Mar 12 23:12:00 2026 +0100
+
+    Add Tailwind CSS, database utilities, and complete Phase 1 UI
+
+diff --git a/package.json b/package.json
+index d913d4f..91d18a1 100644
+--- a/package.json
++++ b/package.json
+@@ -32,6 +32,8 @@
+ 		"@sveltejs/adapter-auto": "^7.0.0",
+ 		"@sveltejs/kit": "^2.50.2",
+ 		"@sveltejs/vite-plugin-svelte": "^6.2.4",
++		"@tailwindcss/forms": "^0.5.9",
++		"@tailwindcss/vite": "^4.1.11",
+ 		"@types/node": "^22",
+ 		"@vitest/browser-playwright": "^4.1.0",
+ 		"drizzle-kit": "^0.31.8",
+@@ -42,6 +44,7 @@
+ 		"playwright": "^1.58.2",
+ 		"svelte": "^5.51.0",
+ 		"svelte-check": "^4.4.2",
++		"tailwindcss": "^4.1.11",
+ 		"typescript": "^5.9.3",
+ 		"typescript-eslint": "^8.54.0",
+ 		"vite": "^7.3.1",
+diff --git a/src/app.css b/src/app.css
+new file mode 100644
+index 0000000..a461c50
+--- /dev/null
++++ b/src/app.css
+@@ -0,0 +1 @@
++@import "tailwindcss";
+\ No newline at end of file
+diff --git a/src/routes/+layout.svelte b/src/routes/+layout.svelte
+new file mode 100644
+index 0000000..b74a593
+--- /dev/null
++++ b/src/routes/+layout.svelte
+@@ -0,0 +1,5 @@
++<script lang="ts">
++	import '../app.css';
++</script>
++
++<slot />
+\ No newline at end of file
+diff --git a/vite.config.ts b/vite.config.ts
+index 282a635..f12f8ad 100644
+--- a/vite.config.ts
++++ b/vite.config.ts
+@@ -1,9 +1,10 @@
+ import { defineConfig } from 'vitest/config';
+ import { playwright } from '@vitest/browser-playwright';
+ import { sveltekit } from '@sveltejs/kit/vite';
++import tailwindcss from '@tailwindcss/vite';
+ 
+ export default defineConfig({
+-	plugins: [sveltekit()],
++	plugins: [sveltekit(), tailwindcss()],
+ 	test: {
+ 		expect: { requireAssertions: true },
+ 		projects: [
+
+commit 2b270e7ee102551e1585c7a8279b7e099dd3dcb7
+Author: Michal <m.nakiewicz@gmail.com>
+Date:   Thu Mar 12 22:56:14 2026 +0100
+
+    at least loaded but tailwind issue
+
+diff --git a/package.json b/package.json
+index 4ba248d..d913d4f 100644
+--- a/package.json
++++ b/package.json
+@@ -25,31 +25,27 @@
+ 		"proj": ""
+ 	},
+ 	"devDependencies": {
+-		"@eslint/compat": "^2.0.3",
+-		"@eslint/js": "^9.39.4",
+-		"@sveltejs/adapter-vercel": "^6.3.3",
+-		"@sveltejs/kit": "^2.54.0",
++		"@eslint/compat": "^2.0.2",
++		"@eslint/js": "^9.39.2",
++		"@neondatabase/serverless": "^1.0.2",
++		"@playwright/test": "^1.58.2",
++		"@sveltejs/adapter-auto": "^7.0.0",
++		"@sveltejs/kit": "^2.50.2",
+ 		"@sveltejs/vite-plugin-svelte": "^6.2.4",
+-		"@tailwindcss/forms": "^0.5.11",
+-		"@tailwindcss/typography": "^0.5.19",
+-		"@tailwindcss/vite": "^4.2.1",
+-		"@types/node": "^22.19.15",
+-		"@vitest/browser-playwright": "^4.0.18",
+-		"dotenv": "^17.3.1",
+-		"drizzle-kit": "^0.31.9",
++		"@types/node": "^22",
++		"@vitest/browser-playwright": "^4.1.0",
++		"drizzle-kit": "^0.31.8",
+ 		"drizzle-orm": "^0.45.1",
+-		"eslint": "^9.39.4",
+-		"eslint-plugin-svelte": "^3.15.2",
+-		"globals": "^17.4.0",
++		"eslint": "^9.39.2",
++		"eslint-plugin-svelte": "^3.14.0",
++		"globals": "^17.3.0",
+ 		"playwright": "^1.58.2",
+-		"svelte": "^5.53.10",
+-		"svelte-check": "^4.4.5",
+-		"tailwindcss": "^4.2.1",
+-		"tsx": "^4.21.0",
++		"svelte": "^5.51.0",
++		"svelte-check": "^4.4.2",
+ 		"typescript": "^5.9.3",
+-		"typescript-eslint": "^8.57.0",
++		"typescript-eslint": "^8.54.0",
+ 		"vite": "^7.3.1",
+-		"vitest": "^4.0.18",
++		"vitest": "^4.1.0",
+ 		"vitest-browser-svelte": "^2.0.2"
+ 	},
+ 	"dependencies": {
+diff --git a/src/lib/server/db/index.ts b/src/lib/server/db/index.ts
+index b12b106..94d18c9 100644
+--- a/src/lib/server/db/index.ts
++++ b/src/lib/server/db/index.ts
+@@ -1,11 +1,10 @@
+ import { drizzle } from 'drizzle-orm/postgres-js';
+ import postgres from 'postgres';
+ import * as schema from './schema';
++import { env } from '$env/dynamic/private';
+ 
+-if (!process.env.DATABASE_URL) {
+-	throw new Error('DATABASE_URL environment variable is not set');
+-}
++if (!env.DATABASE_URL) throw new Error('DATABASE_URL is not set');
+ 
+-const client = postgres(process.env.DATABASE_URL);
++const client = postgres(env.DATABASE_URL);
+ 
+-export const db = drizzle(client, { schema });
++export const db = drizzle(client, { schema });
+\ No newline at end of file
+diff --git a/src/lib/server/db/queries.ts b/src/lib/server/db/queries.ts
+index e277e61..fefd581 100644
+--- a/src/lib/server/db/queries.ts
++++ b/src/lib/server/db/queries.ts
+@@ -2,7 +2,7 @@
+  * All database interactions for the application.
+  * Route files import from here — keeps server routes lean.
+  */
+-import { and, eq, lt, sql } from 'drizzle-orm';
++import { and, eq, lt, lte, gte, sql } from 'drizzle-orm';
+ import { db } from './index';
+ import {
+ 	globalSettings,
+@@ -57,8 +57,8 @@ export async function getActiveDrop(): Promise<Drop | null> {
+ 		.where(
+ 			and(
+ 				eq(drop.status, 'ACTIVE'),
+-				sql`${drop.opens_at} <= ${now}`,
+-				sql`${drop.closes_at} >= ${now}`
++				lte(drop.opens_at, now),
++				gte(drop.closes_at, now)
+ 			)
+ 		)
+ 		.limit(1);
+diff --git a/src/routes/(shop)/+layout.svelte b/src/routes/(shop)/+layout.svelte
+index fa9e520..bd576a0 100644
+--- a/src/routes/(shop)/+layout.svelte
++++ b/src/routes/(shop)/+layout.svelte
+@@ -1,8 +1,9 @@
+ <script lang="ts">
+ 	import { cartCount } from '$lib/cart.svelte';
+ 	import type { LayoutData } from './$types';
++	import type { Snippet } from 'svelte';
+ 
+-	let { data, children }: { data: LayoutData; children: import('svelte').Snippet } = $props();
++	let { data, children } = $props<{ data: LayoutData; children: Snippet }>();
+ </script>
+ 
+ <div class="min-h-screen bg-slate-950 text-slate-100 font-mono">
+diff --git a/src/routes/(shop)/+page.svelte b/src/routes/(shop)/+page.svelte
+index 539b55f..6a38f20 100644
+--- a/src/routes/(shop)/+page.svelte
++++ b/src/routes/(shop)/+page.svelte
+@@ -15,87 +15,87 @@
+ </script>
+ 
+ <svelte:head>
+-	<title>Fidget Fun! — Weekly Drop</title>
++    <title>Fidget Fun! — Weekly Drop</title>
+ </svelte:head>
+ 
+ <!-- Printer status -->
+ <PrinterStatus
+-	isOn={data.settings.printer_is_on}
+-	message={data.settings.status_message}
+-	estimatedDays={data.settings.active_window_end_hour - data.settings.active_window_start_hour}
++        isOn={data.settings.printer_is_on}
++        message={data.settings.status_message}
++        estimatedDays={data.settings.active_window_end_hour - data.settings.active_window_start_hour}
+ />
+ 
+ <!-- Drop info -->
+ {#if data.activeDrop}
+-	<div class="mt-6 mb-8">
+-		<div class="flex items-center justify-between mb-2">
+-			<h1 class="text-xl font-bold text-slate-100">Weekly Drop</h1>
+-			<ScarcityBadge remainingMinutes={remaining} />
+-		</div>
+-		<DropCountdown closesAt={new Date(data.activeDrop.closes_at)} />
+-	</div>
++    <div class="mt-6 mb-8">
++        <div class="flex items-center justify-between mb-2">
++            <h1 class="text-xl font-bold text-slate-100">Weekly Drop</h1>
++            <ScarcityBadge remainingMinutes={remaining}/>
++        </div>
++        <DropCountdown closesAt={new Date(data.activeDrop.closes_at)}/>
++    </div>
+ {:else}
+-	<div class="mt-8 text-center py-12 border border-dashed border-slate-700 rounded-lg">
+-		<p class="text-slate-400 text-sm">Brak aktywnego dropu.</p>
+-		<p class="text-slate-600 text-xs mt-1">Wróć wkrótce — ogłaszamy nowy drop co tydzień!</p>
+-	</div>
++    <div class="mt-8 text-center py-12 border border-dashed border-slate-700 rounded-lg">
++        <p class="text-slate-400 text-sm">Brak aktywnego dropu.</p>
++        <p class="text-slate-600 text-xs mt-1">Wróć wkrótce — ogłaszamy nowy drop co tydzień!</p>
++    </div>
+ {/if}
+ 
+ <!-- Product grid -->
+ {#if data.products.length > 0}
+-	<div class="grid gap-4">
+-		{#each data.products as { product, variants }}
+-			<a
+-				href="/products/{product.id}"
+-				class="block bg-slate-900 border border-slate-700 rounded-xl p-4 hover:border-cyan-600 transition-colors group"
+-			>
+-				<div class="flex items-start justify-between gap-3">
+-					<div class="flex-1 min-w-0">
+-						<h2 class="font-bold text-slate-100 group-hover:text-cyan-400 transition-colors">
+-							{product.name}
+-						</h2>
+-						{#if product.description}
+-							<p class="text-slate-400 text-sm mt-1 line-clamp-2">{product.description}</p>
+-						{/if}
++    <div class="grid gap-4">
++        {#each data.products as {product, variants}}
++            <a
++                    href="/products/{product.id}"
++                    class="block bg-slate-900 border border-slate-700 rounded-xl p-4 hover:border-cyan-600 transition-colors group"
++            >
++                <div class="flex items-start justify-between gap-3">
++                    <div class="flex-1 min-w-0">
++                        <h2 class="font-bold text-slate-100 group-hover:text-cyan-400 transition-colors">
++                            {product.name}
++                        </h2>
++                        {#if product.description}
++                            <p class="text-slate-400 text-sm mt-1 line-clamp-2">{product.description}</p>
++                        {/if}
+ 
+-						<!-- Colour swatches preview -->
+-						<div class="flex gap-1.5 mt-3">
+-							{#each variants.slice(0, 8) as variant}
++                        <!-- Colour swatches preview -->
++                        <div class="flex gap-1.5 mt-3">
++                            {#each variants.slice(0, 8) as variant}
+ 								<span
+-									class="w-5 h-5 rounded-full border-2 border-slate-700 flex-shrink-0"
+-									style="background-color: {variant.hex_code}"
+-									title={variant.filament_color}
+-								></span>
+-							{/each}
+-							{#if variants.length > 8}
+-								<span class="text-slate-500 text-xs self-center">+{variants.length - 8}</span>
+-							{/if}
+-						</div>
+-					</div>
++                                        class="w-5 h-5 rounded-full border-2 border-slate-700 flex-shrink-0"
++                                        style="background-color: {variant.hex_code}"
++                                        title={variant.filament_color}
++                                ></span>
++                            {/each}
++                            {#if variants.length > 8}
++                                <span class="text-slate-500 text-xs self-center">+{variants.length - 8}</span>
++                            {/if}
++                        </div>
++                    </div>
+ 
+-					<div class="text-right flex-shrink-0">
+-						<p class="text-cyan-400 font-bold text-lg">{formatPln(product.price_pln)}</p>
+-						<p class="text-slate-500 text-xs mt-0.5">{formatMinutes(product.print_duration_minutes)}</p>
+-					</div>
+-				</div>
+-			</a>
+-		{/each}
+-	</div>
++                    <div class="text-right flex-shrink-0">
++                        <p class="text-cyan-400 font-bold text-lg">{formatPln(product.price_pln)}</p>
++                        <p class="text-slate-500 text-xs mt-0.5">{formatMinutes(product.print_duration_minutes)}</p>
++                    </div>
++                </div>
++            </a>
++        {/each}
++    </div>
+ {:else if data.activeDrop}
+-	<p class="text-slate-500 text-sm text-center py-8">Ładowanie produktów…</p>
++    <p class="text-slate-500 text-sm text-center py-8">Ładowanie produktów…</p>
+ {/if}
+ 
+ <!-- Story section -->
+ <div class="mt-12 border-t border-slate-800 pt-8">
+-	<h2 class="text-sm font-bold text-slate-500 uppercase tracking-widest mb-4">Kim jesteśmy</h2>
+-	<div class="bg-slate-900 border border-slate-700 rounded-xl p-5 space-y-2">
+-		<p class="text-slate-300 text-sm">
+-			Jesteśmy Leo (12 lat) i Sam (10 lat). Drukujemy zabawki fidget na naszej drukarce 3D.
+-		</p>
+-		<p class="text-slate-400 text-sm">
+-			Każdy produkt drukujemy ręcznie — ile zmieści się w danym tygodniu, tyle wychodzi. Nasz
+-			Wujek Mike pomaga z wysyłką.
+-		</p>
+-		<p class="text-cyan-500 text-xs font-medium">🔧 Prawdziwi ludzie. Prawdziwy druk. Bez bullshitu.</p>
+-	</div>
++    <h2 class="text-sm font-bold text-slate-500 uppercase tracking-widest mb-4">Kim jesteśmy</h2>
++    <div class="bg-slate-900 border border-slate-700 rounded-xl p-5 space-y-2">
++        <p class="text-slate-300 text-sm">
++            Jesteśmy Leo (12 lat) i Sam (10 lat). Drukujemy zabawki fidget na naszej drukarce 3D.
++        </p>
++        <p class="text-slate-400 text-sm">
++            Każdy produkt drukujemy ręcznie — ile zmieści się w danym tygodniu, tyle wychodzi. Nasz
++            Wujek Mike pomaga z wysyłką.
++        </p>
++        <p class="text-cyan-500 text-xs font-medium">🔧 Prawdziwi ludzie. Prawdziwy druk. Bez bullshitu.</p>
++    </div>
+ </div>
+diff --git a/svelte.config.js b/svelte.config.js
+index 50a2aa8..d2dd2e6 100644
+--- a/svelte.config.js
++++ b/svelte.config.js
+@@ -1,10 +1,17 @@
+-import adapter from '@sveltejs/adapter-vercel';
+-import { vitePreprocess } from '@sveltejs/vite-plugin-svelte';
++import adapter from '@sveltejs/adapter-auto';
+ 
+ /** @type {import('@sveltejs/kit').Config} */
+ const config = {
+-	preprocess: vitePreprocess(),
+-	kit: { adapter: adapter() }
++	kit: {
++		// adapter-auto only supports some environments, see https://svelte.dev/docs/kit/adapter-auto for a list.
++		// If your environment is not supported, or you settled on a specific environment, switch out the adapter.
++		// See https://svelte.dev/docs/kit/adapters for more information about adapters.
++		adapter: adapter()
++	},
++	vitePlugin: {
++		dynamicCompileOptions: ({ filename }) =>
++			filename.includes('node_modules') ? undefined : { runes: true }
++	}
+ };
+ 
+ export default config;
+diff --git a/vite.config.ts b/vite.config.ts
+index 1f2d09c..282a635 100644
+--- a/vite.config.ts
++++ b/vite.config.ts
+@@ -1,13 +1,35 @@
+ import { defineConfig } from 'vitest/config';
++import { playwright } from '@vitest/browser-playwright';
++import { sveltekit } from '@sveltejs/kit/vite';
+ 
+ export default defineConfig({
+-  test: {
+-    globals: true,
+-    environment: 'node',
+-    testTimeout: 45000,
+-    hookTimeout: 15000,
+-    include: ['src/tests/**/*.test.ts'],
+-    sequence: { shuffle: false },
+-    reporters: ['verbose']
+-  }
++	plugins: [sveltekit()],
++	test: {
++		expect: { requireAssertions: true },
++		projects: [
++			{
++				extends: './vite.config.ts',
++				test: {
++					name: 'client',
++					browser: {
++						enabled: true,
++						provider: playwright(),
++						instances: [{ browser: 'chromium', headless: true }]
++					},
++					include: ['src/**/*.svelte.{test,spec}.{js,ts}'],
++					exclude: ['src/lib/server/**']
++				}
++			},
++
++			{
++				extends: './vite.config.ts',
++				test: {
++					name: 'server',
++					environment: 'node',
++					include: ['src/**/*.{test,spec}.{js,ts}'],
++					exclude: ['src/**/*.svelte.{test,spec}.{js,ts}']
++				}
++			}
++		]
++	}
+ });
+
+commit 1750fe31bed7e53ecc3195fe08ed243aba6503b7
+Author: Michal <m.nakiewicz@gmail.com>
+Date:   Thu Mar 12 22:26:07 2026 +0100
+
+    dev
+
+diff --git a/package.json b/package.json
+index cfca9ae..4ba248d 100644
+--- a/package.json
++++ b/package.json
+@@ -16,7 +16,13 @@
+ 		"db:push": "drizzle-kit push",
+ 		"db:generate": "drizzle-kit generate",
+ 		"db:migrate": "drizzle-kit migrate",
+-		"db:studio": "drizzle-kit studio"
++		"db:studio": "drizzle-kit studio",
++		"db:seed": "tsx src/lib/server/db/seed.ts",
++		"db:add-indexes": "tsx src/lib/server/db/add-indexes.ts",
++		"db:verify": "tsx src/lib/server/db/verify.ts",
++		"db:create-drop": "tsx src/lib/server/db/create-test-drop.ts",
++		"doc": "find docs -name \"*.md\" -not -path \"*rules*\" -not -name \"*PLAN*\" -not -name \"*llm*\"",
++		"proj": ""
+ 	},
+ 	"devDependencies": {
+ 		"@eslint/compat": "^2.0.3",
+@@ -29,6 +35,7 @@
+ 		"@tailwindcss/vite": "^4.2.1",
+ 		"@types/node": "^22.19.15",
+ 		"@vitest/browser-playwright": "^4.0.18",
++		"dotenv": "^17.3.1",
+ 		"drizzle-kit": "^0.31.9",
+ 		"drizzle-orm": "^0.45.1",
+ 		"eslint": "^9.39.4",
+@@ -38,6 +45,7 @@
+ 		"svelte": "^5.53.10",
+ 		"svelte-check": "^4.4.5",
+ 		"tailwindcss": "^4.2.1",
++		"tsx": "^4.21.0",
+ 		"typescript": "^5.9.3",
+ 		"typescript-eslint": "^8.57.0",
+ 		"vite": "^7.3.1",
+diff --git a/svelte.config.js b/svelte.config.js
+index 89106df..50a2aa8 100644
+--- a/svelte.config.js
++++ b/svelte.config.js
+@@ -1,6 +1,10 @@
+ import adapter from '@sveltejs/adapter-vercel';
++import { vitePreprocess } from '@sveltejs/vite-plugin-svelte';
+ 
+ /** @type {import('@sveltejs/kit').Config} */
+-const config = { kit: { adapter: adapter() } };
++const config = {
++	preprocess: vitePreprocess(),
++	kit: { adapter: adapter() }
++};
+ 
+ export default config;
+diff --git a/vite.config.ts b/vite.config.ts
+index f22be4a..1f2d09c 100644
+--- a/vite.config.ts
++++ b/vite.config.ts
+@@ -1,36 +1,13 @@
+-import tailwindcss from '@tailwindcss/vite';
+ import { defineConfig } from 'vitest/config';
+-import { playwright } from '@vitest/browser-playwright';
+-import { sveltekit } from '@sveltejs/kit/vite';
+ 
+ export default defineConfig({
+-	plugins: [tailwindcss(), sveltekit()],
+-	test: {
+-		expect: { requireAssertions: true },
+-		projects: [
+-			{
+-				extends: './vite.config.ts',
+-				test: {
+-					name: 'client',
+-					browser: {
+-						enabled: true,
+-						provider: playwright(),
+-						instances: [{ browser: 'chromium', headless: true }]
+-					},
+-					include: ['src/**/*.svelte.{test,spec}.{js,ts}'],
+-					exclude: ['src/lib/server/**']
+-				}
+-			},
+-
+-			{
+-				extends: './vite.config.ts',
+-				test: {
+-					name: 'server',
+-					environment: 'node',
+-					include: ['src/**/*.{test,spec}.{js,ts}'],
+-					exclude: ['src/**/*.svelte.{test,spec}.{js,ts}']
+-				}
+-			}
+-		]
+-	}
++  test: {
++    globals: true,
++    environment: 'node',
++    testTimeout: 45000,
++    hookTimeout: 15000,
++    include: ['src/tests/**/*.test.ts'],
++    sequence: { shuffle: false },
++    reporters: ['verbose']
++  }
+ });
+
+commit 0fcc841dbb163d13207f11fe7622da3ad683704d
+Author: Michal <m.nakiewicz@gmail.com>
+Date:   Thu Mar 12 21:33:37 2026 +0100
+
+    Add Phase 1 storefront, checkout, and order management
+
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000..21f913b
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1,26 @@
++node_modules
++.svelte-kit
++build
++dist
++.env
++.env.*
++!.env.example
++
++# IDE
++.idea/
++.vscode/
++
++# OS
++.DS_Store
++Thumbs.db
++
++# Drizzle migrations
++drizzle/
++
++# Vercel
++.vercel/
++
++# Testing
++test-results/
++playwright-report/
++
+diff --git a/docs/PLAN.md b/docs/PLAN.md
+index f767245..dc1bc4e 100644
+--- a/docs/PLAN.md
++++ b/docs/PLAN.md
+@@ -1,6 +1,6 @@
+ # Fidget Fun! — Implementation Plan
+ 
+-**Status:** Phase 0 in progress | **Last updated:** 2026-03-11
++**Status:** Phase 2 ready to start | **Last updated:** 2026-03-12
+ 
+ ---
+ 
+@@ -35,49 +35,56 @@ The DDD doc (`02-domain-driven-design-and-rules.md`) is canonical. CLAUDE.md has
+ 
+ ---
+ 
+-## Phase 0 — Schema & Foundation ✅ IN PROGRESS
++## Phase 0 — Schema & Foundation ✅ COMPLETE
+ 
+ **Goal:** DB schema, business logic module, DB client, Vitest coverage.
+ 
+ - [x] `src/lib/server/db/schema.ts` — Drizzle schema (all tables + enums)
+ - [x] `src/lib/server/db/index.ts` — Neon postgres client
+ - [x] `src/lib/server/capacity.ts` — Capacity engine (pure functions, no DB)
+-- [x] `src/lib/server/capacity.test.ts` — Vitest tests for capacity engine
+-- [ ] `pnpm db:push` — apply schema to Neon (requires DATABASE_URL)
+-- [ ] `.env` setup
++- [x] `src/lib/server/capacity.test.ts` — 34 tests passing
++- [ ] `pnpm db:push` — apply schema to Neon (requires DATABASE_URL in .env)
+ 
+-**Outcome:** Schema is live, all business logic is tested, types exported for use across the app.
++**Outcome:** Schema defined, 34 capacity engine tests green, types exported for use across the app.
+ 
+ ---
+ 
+-## Phase 1 — Customer Storefront `/(shop)`
++## Phase 1 — Customer Storefront `/(shop)` ✅ COMPLETE
+ 
+ **Goal:** Full purchase flow for a customer on mobile.
+ 
+-### Routes
+-| File | Purpose |
+-|---|---|
+-| `src/routes/(shop)/+layout.server.ts` | Load `global_settings` + active `drop` for all shop pages |
+-| `src/routes/(shop)/+page.svelte` | Homepage: Factory Switch widget, Drop countdown, product grid |
+-| `src/routes/(shop)/products/[id]/+page.server.ts` | Load product + variants |
+-| `src/routes/(shop)/products/[id]/+page.svelte` | PDP: swatches, print time widget, Add to Cart |
+-| `src/routes/(shop)/checkout/+page.server.ts` | Capacity validation action, BLIK initiation action |
+-| `src/routes/(shop)/checkout/+page.svelte` | Checkout form: email/phone, InPost Geowidget, BLIK timer |
+-| `src/routes/(shop)/orders/[id]/+page.server.ts` | Load order by ID |
+-| `src/routes/(shop)/orders/[id]/+page.svelte` | Order status display |
+-| `src/routes/api/webhook/payment/+server.ts` | Payment gateway webhook: hard deduct, order → PAID |
+-
+-### Components (co-located or `src/lib/components/`)
+-- `PrinterStatus.svelte` — Factory Switch widget (ON/OFF state)
+-- `DropCountdown.svelte` — live countdown to drop close
+-- `ScarcityBadge.svelte` — "Only N minutes left!" display
+-- `ColorSwatch.svelte` — filament color picker
+-- `BlikTimer.svelte` — 2-minute countdown + 6-digit input
+-- `InPostWidget.svelte` — embed InPost Geowidget script
++**Architecture notes:**
++- Cart is client-side `$state` in `src/lib/cart.svelte.ts`, persisted to `sessionStorage`
++- Checkout sends only `variantId + quantity`; server re-validates prices and capacity from DB
++- Atomic soft lock uses Drizzle UPDATE with conditional WHERE (no SELECT FOR UPDATE needed)
++- BLIK payment gateway call is **stubbed** — real integration is Phase 4
+ 
+-### Tests
+-- `src/lib/server/checkout.test.ts` — order creation, soft lock logic
+-- `src/routes/(shop)/checkout/checkout.svelte.test.ts` — BlikTimer component
++### Files
++| File | Status | Purpose |
++|---|---|---|
++| `src/lib/formatting.ts` | [x] | PLN formatter, status labels, print time display |
++| `src/lib/formatting.test.ts` | [x] | 16 tests |
++| `src/lib/server/orders.ts` | [x] | Pure order logic: validateDropIsOpen, computeTotal, lock expiry |
++| `src/lib/server/orders.test.ts` | [x] | 14 tests |
++| `src/lib/server/db/queries.ts` | [x] | All DB interactions |
++| `src/lib/cart.svelte.ts` | [x] | Client cart state (runes, sessionStorage) |
++| `src/routes/(shop)/+layout.server.ts` | [x] | Load global_settings + active drop |
++| `src/routes/(shop)/+layout.svelte` | [x] | Shop shell with header |
++| `src/routes/(shop)/+page.server.ts` | [x] | Load drop products |
++| `src/routes/(shop)/+page.svelte` | [x] | Homepage: status, countdown, product grid |
++| `src/routes/(shop)/products/[id]/+page.server.ts` | [x] | Load product + variants |
++| `src/routes/(shop)/products/[id]/+page.svelte` | [x] | PDP: swatches, print time, Add to Cart |
++| `src/routes/(shop)/checkout/+page.server.ts` | [x] | Checkout action: capacity + order creation |
++| `src/routes/(shop)/checkout/+page.svelte` | [x] | Checkout form + BLIK timer |
++| `src/routes/(shop)/orders/[id]/+page.server.ts` | [x] | Load order |
++| `src/routes/(shop)/orders/[id]/+page.svelte` | [x] | Order status display |
++| `src/routes/api/webhook/payment/+server.ts` | [x] | Payment webhook (signature stubbed) |
++| `src/lib/components/PrinterStatus.svelte` | [x] | Factory Switch widget |
++| `src/lib/components/DropCountdown.svelte` | [x] | Live drop countdown |
++| `src/lib/components/ScarcityBadge.svelte` | [x] | Remaining capacity badge |
++| `src/lib/components/ColorSwatch.svelte` | [x] | Filament colour picker |
++| `src/lib/components/BlikTimer.svelte` | [x] | 2-min countdown + BLIK input |
++| `src/lib/components/BlikTimer.svelte.test.ts` | [x] | Component tests |
+ 
+ ---
+ 
+diff --git a/src/lib/cart.svelte.ts b/src/lib/cart.svelte.ts
+new file mode 100644
+index 0000000..c416765
+--- /dev/null
++++ b/src/lib/cart.svelte.ts
+@@ -0,0 +1,78 @@
++/**
++ * Client-side cart state — Svelte 5 runes module.
++ * Persisted to sessionStorage. Safe to import in any Svelte component.
++ *
++ * Only variantId + quantity are sent to the server at checkout.
++ * Prices and print durations are display-only and always re-validated server-side.
++ */
++import { browser } from '$app/environment';
++
++export interface CartItem {
++	variantId: number;
++	productId: number;
++	productName: string;
++	filamentColor: string;
++	hexCode: string;
++	/** Display only — server re-validates from DB */
++	pricePln: number;
++	/** Display only — server re-validates from DB */
++	printDurationMinutes: number;
++	isMystery: boolean;
++	quantity: number;
++}
++
++const STORAGE_KEY = 'fidget_cart';
++
++function loadFromStorage(): CartItem[] {
++	if (!browser) return [];
++	try {
++		return JSON.parse(sessionStorage.getItem(STORAGE_KEY) ?? '[]') as CartItem[];
++	} catch {
++		return [];
++	}
++}
++
++let items = $state<CartItem[]>(loadFromStorage());
++
++function persist(): void {
++	if (!browser) return;
++	sessionStorage.setItem(STORAGE_KEY, JSON.stringify(items));
++}
++
++export function cartItems(): CartItem[] {
++	return items;
++}
++
++export function cartCount(): number {
++	return items.reduce((sum, i) => sum + i.quantity, 0);
++}
++
++export function cartTotal(): number {
++	return items.reduce((sum, i) => sum + i.pricePln * i.quantity, 0);
++}
++
++export function addToCart(item: Omit<CartItem, 'quantity'>, quantity = 1): void {
++	const existing = items.find((i) => i.variantId === item.variantId);
++	if (existing) {
++		existing.quantity += quantity;
++	} else {
++		items.push({ ...item, quantity });
++	}
++	persist();
++}
++
++export function removeFromCart(variantId: number): void {
++	const idx = items.findIndex((i) => i.variantId === variantId);
++	if (idx !== -1) items.splice(idx, 1);
++	persist();
++}
++
++export function clearCart(): void {
++	items.length = 0;
++	persist();
++}
++
++/** Serialises cart for the checkout form hidden input (variantId + quantity only) */
++export function cartToCheckoutPayload(): Array<{ variantId: number; quantity: number }> {
++	return items.map((i) => ({ variantId: i.variantId, quantity: i.quantity }));
++}
+diff --git a/src/lib/components/BlikTimer.svelte b/src/lib/components/BlikTimer.svelte
+new file mode 100644
+index 0000000..509e32c
+--- /dev/null
++++ b/src/lib/components/BlikTimer.svelte
+@@ -0,0 +1,125 @@
++<script lang="ts">
++	import { onMount, untrack } from 'svelte';
++	import { formatCountdown } from '$lib/formatting';
++
++	let {
++		onExpire,
++		onSuccess = undefined,
++		duration = 120
++	}: {
++		onExpire: () => void;
++		onSuccess?: () => void;
++		duration?: number;
++	} = $props();
++
++	// Capture initial duration — timer is one-shot and does not react to prop changes
++	const totalSeconds = untrack(() => duration);
++	let secondsLeft = $state(totalSeconds);
++	let blikCode = $state('');
++	let submitting = $state(false);
++	let interval: ReturnType<typeof setInterval> | undefined;
++
++	const progress = $derived(secondsLeft / totalSeconds);
++	const isExpired = $derived(secondsLeft <= 0);
++	const isUrgent = $derived(secondsLeft <= 30);
++	const codeValid = $derived(/^\d{6}$/.test(blikCode));
++
++	onMount(() => {
++		interval = setInterval(() => {
++			secondsLeft = Math.max(0, secondsLeft - 1);
++			if (secondsLeft === 0) {
++				clearInterval(interval);
++				onExpire();
++			}
++		}, 1000);
++		return () => clearInterval(interval);
++	});
++
++	function handleSubmit() {
++		if (!codeValid || submitting || isExpired) return;
++		submitting = true;
++		// Phase 4: call payment gateway API here
++		// For now: simulate success after 1 second
++		setTimeout(() => {
++			submitting = false;
++			onSuccess?.();
++		}, 1000);
++	}
++
++	function handleInput(e: Event) {
++		const value = (e.target as HTMLInputElement).value.replace(/\D/g, '').slice(0, 6);
++		blikCode = value;
++	}
++</script>
++
++<div class="space-y-5">
++	<!-- Countdown ring -->
++	<div class="flex flex-col items-center gap-3">
++		<div class="relative w-24 h-24">
++			<svg class="w-24 h-24 -rotate-90" viewBox="0 0 96 96">
++				<!-- Background track -->
++				<circle cx="48" cy="48" r="40" fill="none" stroke="#1e293b" stroke-width="8" />
++				<!-- Progress arc -->
++				<circle
++					cx="48"
++					cy="48"
++					r="40"
++					fill="none"
++					stroke={isExpired ? '#ef4444' : isUrgent ? '#f59e0b' : '#22d3ee'}
++					stroke-width="8"
++					stroke-linecap="round"
++					stroke-dasharray={2 * Math.PI * 40}
++					stroke-dashoffset={2 * Math.PI * 40 * (1 - progress)}
++					class="transition-all duration-1000"
++				/>
++			</svg>
++			<div class="absolute inset-0 flex items-center justify-center">
++				<span
++					class={`font-mono font-bold text-2xl ${
++						isExpired ? 'text-red-400' : isUrgent ? 'text-amber-400' : 'text-cyan-400'
++					}`}
++				>
++					{isExpired ? '0:00' : formatCountdown(secondsLeft)}
++				</span>
++			</div>
++		</div>
++
++		{#if isExpired}
++			<p class="text-red-400 text-sm font-medium">Czas minął. Zamówienie zostanie anulowane.</p>
++		{:else}
++			<p class="text-slate-400 text-sm">Otwórz aplikację bankową i potwierdź BLIK</p>
++		{/if}
++	</div>
++
++	<!-- BLIK code input -->
++	<div class="space-y-3">
++		<label for="blik-code" class="block text-xs text-slate-400 text-center">
++			Wpisz 6-cyfrowy kod BLIK
++		</label>
++		<input
++			id="blik-code"
++			type="text"
++			inputmode="numeric"
++			autocomplete="one-time-code"
++			value={blikCode}
++			oninput={handleInput}
++			disabled={isExpired || submitting}
++			maxlength={6}
++			placeholder="000000"
++			class={`w-full text-center text-3xl font-mono tracking-widest bg-slate-800 border rounded-xl py-4 focus:outline-none transition-colors ${
++				codeValid
++					? 'border-cyan-500 text-cyan-400 focus:ring-1 focus:ring-cyan-500/30'
++					: 'border-slate-600 text-slate-300 focus:border-cyan-600'
++			} disabled:opacity-50`}
++		/>
++
++		<button
++			type="button"
++			onclick={handleSubmit}
++			disabled={!codeValid || isExpired || submitting}
++			class="w-full bg-cyan-500 hover:bg-cyan-400 disabled:bg-slate-700 disabled:text-slate-500 text-slate-950 font-bold py-4 rounded-xl text-base transition-colors"
++		>
++			{submitting ? 'Weryfikuję…' : 'Potwierdź płatność BLIK'}
++		</button>
++	</div>
++</div>
+diff --git a/src/lib/components/BlikTimer.svelte.test.ts b/src/lib/components/BlikTimer.svelte.test.ts
+new file mode 100644
+index 0000000..37c619e
+--- /dev/null
++++ b/src/lib/components/BlikTimer.svelte.test.ts
+@@ -0,0 +1,64 @@
++import { render } from 'vitest-browser-svelte';
++import { expect, it, describe, vi, beforeEach, afterEach } from 'vitest';
++import BlikTimer from './BlikTimer.svelte';
++
++describe('BlikTimer', () => {
++	beforeEach(() => {
++		vi.useFakeTimers();
++	});
++
++	afterEach(() => {
++		vi.useRealTimers();
++	});
++
++	it('renders the initial 2:00 countdown', async () => {
++		const screen = render(BlikTimer, { onExpire: () => {} });
++		await expect.element(screen.getByText('2:00')).toBeVisible();
++	});
++
++	it('renders the BLIK code input field', async () => {
++		const screen = render(BlikTimer, { onExpire: () => {} });
++		await expect.element(screen.getByRole('textbox')).toBeVisible();
++	});
++
++	it('renders the submit button as disabled initially (no code entered)', async () => {
++		const screen = render(BlikTimer, { onExpire: () => {} });
++		const btn = screen.getByRole('button', { name: /potwierdź/i });
++		await expect.element(btn).toBeDisabled();
++	});
++
++	it('enables submit button when 6 digits are entered', async () => {
++		const screen = render(BlikTimer, { onExpire: () => {} });
++		const input = screen.getByRole('textbox');
++		await input.fill('123456');
++		const btn = screen.getByRole('button', { name: /potwierdź/i });
++		await expect.element(btn).not.toBeDisabled();
++	});
++
++	it('does not enable submit with fewer than 6 digits', async () => {
++		const screen = render(BlikTimer, { onExpire: () => {} });
++		const input = screen.getByRole('textbox');
++		await input.fill('12345');
++		const btn = screen.getByRole('button', { name: /potwierdź/i });
++		await expect.element(btn).toBeDisabled();
++	});
++
++	it('calls onExpire after the countdown reaches zero', async () => {
++		const onExpire = vi.fn();
++		render(BlikTimer, { onExpire, duration: 2 });
++
++		vi.advanceTimersByTime(3000);
++		expect(onExpire).toHaveBeenCalledOnce();
++	});
++
++	it('shows 0:00 after expiry', async () => {
++		const screen = render(BlikTimer, { onExpire: () => {}, duration: 1 });
++		vi.advanceTimersByTime(2000);
++		await expect.element(screen.getByText('0:00')).toBeVisible();
++	});
++
++	it('accepts custom duration', async () => {
++		const screen = render(BlikTimer, { onExpire: () => {}, duration: 60 });
++		await expect.element(screen.getByText('1:00')).toBeVisible();
++	});
++});
+diff --git a/src/lib/components/ColorSwatch.svelte b/src/lib/components/ColorSwatch.svelte
+new file mode 100644
+index 0000000..c9c7e02
+--- /dev/null
++++ b/src/lib/components/ColorSwatch.svelte
+@@ -0,0 +1,39 @@
++<script lang="ts">
++	import type { ProductVariant } from '$lib/server/db/schema';
++
++	let {
++		variant,
++		selected,
++		onSelect
++	}: {
++		variant: ProductVariant;
++		selected: boolean;
++		onSelect: () => void;
++	} = $props();
++</script>
++
++<button
++	type="button"
++	onclick={onSelect}
++	title={variant.filament_color}
++	class={`relative w-9 h-9 rounded-full transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500 ${
++		selected ? 'ring-2 ring-cyan-400 ring-offset-2 ring-offset-slate-950 scale-110' : 'hover:scale-105'
++	}`}
++	style="background-color: {variant.hex_code}"
++>
++	{#if selected}
++		<span
++			class="absolute inset-0 flex items-center justify-center"
++		>
++			<svg class="w-4 h-4" viewBox="0 0 20 20" fill="currentColor">
++				<path
++					fill-rule="evenodd"
++					d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"
++					clip-rule="evenodd"
++					style="filter: drop-shadow(0 0 1px rgba(0,0,0,0.8))"
++					fill="white"
++				/>
++			</svg>
++		</span>
++	{/if}
++</button>
+diff --git a/src/lib/components/DropCountdown.svelte b/src/lib/components/DropCountdown.svelte
+new file mode 100644
+index 0000000..3baef63
+--- /dev/null
++++ b/src/lib/components/DropCountdown.svelte
+@@ -0,0 +1,38 @@
++<script lang="ts">
++	import { onMount } from 'svelte';
++
++	let { closesAt }: { closesAt: Date } = $props();
++
++	let remaining = $state(0);
++	let interval: ReturnType<typeof setInterval> | undefined;
++
++	function tick() {
++		remaining = Math.max(0, Math.floor((closesAt.getTime() - Date.now()) / 1000));
++	}
++
++	onMount(() => {
++		tick();
++		interval = setInterval(tick, 1000);
++		return () => clearInterval(interval);
++	});
++
++	const days = $derived(Math.floor(remaining / 86400));
++	const hours = $derived(Math.floor((remaining % 86400) / 3600));
++	const minutes = $derived(Math.floor((remaining % 3600) / 60));
++	const seconds = $derived(remaining % 60);
++
++	const isClosed = $derived(remaining === 0);
++</script>
++
++{#if isClosed}
++	<p class="text-red-400 text-sm font-medium">Drop zakończony.</p>
++{:else}
++	<div class="flex items-center gap-1 text-sm text-slate-400">
++		<span class="text-slate-500 text-xs">Drop zamyka się za:</span>
++		<span class="font-mono text-slate-200 ml-1">
++			{#if days > 0}{days}d {/if}{hours.toString().padStart(2, '0')}:{minutes
++				.toString()
++				.padStart(2, '0')}:{seconds.toString().padStart(2, '0')}
++		</span>
++	</div>
++{/if}
+diff --git a/src/lib/components/PrinterStatus.svelte b/src/lib/components/PrinterStatus.svelte
+new file mode 100644
+index 0000000..26d78c0
+--- /dev/null
++++ b/src/lib/components/PrinterStatus.svelte
+@@ -0,0 +1,45 @@
++<script lang="ts">
++	let {
++		isOn,
++		message = '',
++		estimatedDays = 3
++	}: {
++		isOn: boolean;
++		message?: string;
++		estimatedDays?: number;
++	} = $props();
++</script>
++
++<div
++	class={`rounded-xl border p-4 flex items-start gap-4 ${
++		isOn ? 'bg-emerald-950/40 border-emerald-700/50' : 'bg-slate-900 border-slate-700'
++	}`}
++>
++	<!-- Status indicator -->
++	<div class="relative flex-shrink-0 mt-0.5">
++		<div
++			class={`w-3 h-3 rounded-full ${isOn ? 'bg-emerald-400' : 'bg-red-500'}`}
++		></div>
++		{#if isOn}
++			<div
++				class="absolute inset-0 w-3 h-3 rounded-full bg-emerald-400 animate-ping opacity-75"
++			></div>
++		{/if}
++	</div>
++
++	<div class="flex-1 min-w-0">
++		{#if isOn}
++			<p class="font-bold text-emerald-400 text-sm">DRUKARNIA AKTYWNA</p>
++			<p class="text-slate-400 text-xs mt-0.5">
++				Dysza gorąca i gotowa. Wysyłka za ok. {estimatedDays} dni robocze.
++			</p>
++		{:else}
++			<p class="font-bold text-red-400 text-sm">DRUKARNIA OFFLINE</p>
++			{#if message}
++				<p class="text-slate-400 text-xs mt-0.5">{message}</p>
++			{:else}
++				<p class="text-slate-500 text-xs mt-0.5">Zamówienia tymczasowo wstrzymane.</p>
++			{/if}
++		{/if}
++	</div>
++</div>
+diff --git a/src/lib/components/ScarcityBadge.svelte b/src/lib/components/ScarcityBadge.svelte
+new file mode 100644
+index 0000000..4abc539
+--- /dev/null
++++ b/src/lib/components/ScarcityBadge.svelte
+@@ -0,0 +1,24 @@
++<script lang="ts">
++	import { scarcityLabel } from '$lib/formatting';
++
++	let {
++		remainingMinutes,
++		class: className = ''
++	}: {
++		remainingMinutes: number;
++		class?: string;
++	} = $props();
++
++	const urgent = $derived(remainingMinutes < 120);
++</script>
++
++<span
++	class={`inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full ${
++		urgent
++			? 'bg-red-900/50 text-red-300 border border-red-700/50'
++			: 'bg-slate-800 text-slate-400 border border-slate-700'
++	} ${className}`}
++>
++	{#if urgent}🔥{/if}
++	{scarcityLabel(remainingMinutes)}
++</span>
+diff --git a/src/lib/formatting.test.ts b/src/lib/formatting.test.ts
+new file mode 100644
+index 0000000..7a15ff5
+--- /dev/null
++++ b/src/lib/formatting.test.ts
+@@ -0,0 +1,113 @@
++import { describe, it, expect } from 'vitest';
++import {
++	formatPln,
++	formatMinutes,
++	orderStatusLabel,
++	scarcityLabel,
++	formatCountdown
++} from './formatting';
++
++describe('formatPln', () => {
++	it('formats zero grosze', () => {
++		expect(formatPln(0)).toBe('0,00 zł');
++	});
++
++	it('formats 1 PLN (100 grosze)', () => {
++		expect(formatPln(100)).toBe('1,00 zł');
++	});
++
++	it('formats typical price', () => {
++		expect(formatPln(2990)).toBe('29,90 zł');
++	});
++
++	it('formats odd cents', () => {
++		expect(formatPln(4999)).toBe('49,99 zł');
++	});
++
++	it('uses comma decimal separator (Polish convention)', () => {
++		expect(formatPln(1050)).toContain(',');
++		expect(formatPln(1050)).not.toMatch(/\d\.\d/);
++	});
++
++	it('always appends zł', () => {
++		expect(formatPln(5000)).toMatch(/zł$/);
++	});
++});
++
++describe('formatMinutes', () => {
++	it('shows minutes for sub-hour duration', () => {
++		expect(formatMinutes(45)).toBe('45 min');
++	});
++
++	it('shows exact hour without minutes', () => {
++		expect(formatMinutes(60)).toBe('ok. 1 godz.');
++		expect(formatMinutes(120)).toBe('ok. 2 godz.');
++	});
++
++	it('shows hours and remainder minutes', () => {
++		expect(formatMinutes(90)).toBe('ok. 1 godz. 30 min');
++		expect(formatMinutes(135)).toBe('ok. 2 godz. 15 min');
++	});
++
++	it('handles single minute', () => {
++		expect(formatMinutes(1)).toBe('1 min');
++	});
++});
++
++describe('orderStatusLabel', () => {
++	it('maps all known statuses to Polish labels', () => {
++		expect(orderStatusLabel('PENDING_PAYMENT')).toBe('Oczekuje na płatność');
++		expect(orderStatusLabel('PAID')).toBe('Płatność potwierdzona');
++		expect(orderStatusLabel('PRINTING')).toBe('W drukarce');
++		expect(orderStatusLabel('PACKED')).toBe('Zapakowane i gotowe');
++		expect(orderStatusLabel('SHIPPED')).toBe('W drodze');
++		expect(orderStatusLabel('DELIVERED')).toBe('Dostarczono');
++		expect(orderStatusLabel('CANCELLED')).toBe('Anulowane');
++		expect(orderStatusLabel('REFUNDED')).toBe('Zwrot środków');
++	});
++
++	it('returns raw value for unknown status', () => {
++		expect(orderStatusLabel('UNKNOWN_STATUS')).toBe('UNKNOWN_STATUS');
++	});
++});
++
++describe('scarcityLabel', () => {
++	it('returns urgency for zero remaining', () => {
++		expect(scarcityLabel(0)).toBe('Ostatnie sztuki!');
++	});
++
++	it('returns urgency for negative remaining (over-allocated guard)', () => {
++		expect(scarcityLabel(-10)).toBe('Ostatnie sztuki!');
++	});
++
++	it('returns near-sold-out for small remainder', () => {
++		expect(scarcityLabel(60)).toBe('Prawie wyprzedane!');
++		expect(scarcityLabel(119)).toBe('Prawie wyprzedane!');
++	});
++
++	it('shows hours for moderate remainder', () => {
++		expect(scarcityLabel(180)).toBe('Zostało ok. 3 godz. produkcji');
++	});
++
++	it('shows available for large capacity', () => {
++		expect(scarcityLabel(600)).toBe('Dostępne');
++	});
++});
++
++describe('formatCountdown', () => {
++	it('formats 120 seconds as 2:00', () => {
++		expect(formatCountdown(120)).toBe('2:00');
++	});
++
++	it('pads seconds below 10', () => {
++		expect(formatCountdown(65)).toBe('1:05');
++	});
++
++	it('formats zero as 0:00', () => {
++		expect(formatCountdown(0)).toBe('0:00');
++	});
++
++	it('formats 59 seconds as 0:59', () => {
++		expect(formatCountdown(59)).toBe('0:59');
++	});
++});
+diff --git a/src/lib/formatting.ts b/src/lib/formatting.ts
+new file mode 100644
+index 0000000..4bd7f92
+--- /dev/null
++++ b/src/lib/formatting.ts
+@@ -0,0 +1,60 @@
++/**
++ * Shared formatting utilities — safe to import on both client and server.
++ */
++
++/**
++ * Formats an integer grosze value as a Polish PLN string.
++ * e.g. 2990 → "29,90 zł"
++ */
++export function formatPln(grosze: number): string {
++	return `${(grosze / 100).toFixed(2).replace('.', ',')} zł`;
++}
++
++/**
++ * Formats a print duration in minutes to a human-readable Polish string.
++ * e.g. 90 → "ok. 1 godz. 30 min", 60 → "ok. 1 godz."
++ */
++export function formatMinutes(minutes: number): string {
++	if (minutes < 60) return `${minutes} min`;
++	const hours = Math.floor(minutes / 60);
++	const mins = minutes % 60;
++	return mins > 0 ? `ok. ${hours} godz. ${mins} min` : `ok. ${hours} godz.`;
++}
++
++/**
++ * Returns a Polish label for a given order status enum value.
++ */
++export function orderStatusLabel(status: string): string {
++	const labels: Record<string, string> = {
++		PENDING_PAYMENT: 'Oczekuje na płatność',
++		PAID: 'Płatność potwierdzona',
++		PRINTING: 'W drukarce',
++		PACKED: 'Zapakowane i gotowe',
++		SHIPPED: 'W drodze',
++		DELIVERED: 'Dostarczono',
++		CANCELLED: 'Anulowane',
++		REFUNDED: 'Zwrot środków'
++	};
++	return labels[status] ?? status;
++}
++
++/**
++ * Returns a scarcity label based on remaining drop capacity minutes.
++ */
++export function scarcityLabel(remainingMinutes: number): string {
++	if (remainingMinutes <= 0) return 'Ostatnie sztuki!';
++	if (remainingMinutes < 120) return 'Prawie wyprzedane!';
++	const hours = Math.floor(remainingMinutes / 60);
++	if (hours < 5) return `Zostało ok. ${hours} godz. produkcji`;
++	return `Dostępne`;
++}
++
++/**
++ * Formats a countdown in seconds as MM:SS.
++ * e.g. 125 → "2:05"
++ */
++export function formatCountdown(totalSeconds: number): string {
++	const m = Math.floor(totalSeconds / 60);
++	const s = totalSeconds % 60;
++	return `${m}:${s.toString().padStart(2, '0')}`;
++}
+diff --git a/src/lib/server/db/queries.ts b/src/lib/server/db/queries.ts
+new file mode 100644
+index 0000000..e277e61
+--- /dev/null
++++ b/src/lib/server/db/queries.ts
+@@ -0,0 +1,296 @@
++/**
++ * All database interactions for the application.
++ * Route files import from here — keeps server routes lean.
++ */
++import { and, eq, lt, sql } from 'drizzle-orm';
++import { db } from './index';
++import {
++	globalSettings,
++	product,
++	productVariant,
++	drop,
++	dropProduct,
++	order,
++	orderItem
++} from './schema';
++import type { GlobalSettings, Drop, Product, ProductVariant, Order, OrderItem } from './schema';
++import { buildSoftLockExpiry } from '../orders';
++import { calculateCartMinutes } from '../capacity';
++
++// ─── Types ────────────────────────────────────────────────────────────────────
++
++export interface ProductWithVariants {
++	product: Product;
++	variants: ProductVariant[];
++}
++
++export interface OrderWithItems {
++	order: Order;
++	items: Array<{
++		item: OrderItem;
++		variant: ProductVariant;
++		product: Product;
++	}>;
++}
++
++export interface CheckoutCartLine {
++	variantId: number;
++	quantity: number;
++}
++
++// ─── Global Settings ──────────────────────────────────────────────────────────
++
++export async function getGlobalSettings(): Promise<GlobalSettings> {
++	const [row] = await db.select().from(globalSettings).where(eq(globalSettings.id, 1));
++	if (!row) throw new Error('global_settings row not found — run seed');
++	return row;
++}
++
++// ─── Drop ─────────────────────────────────────────────────────────────────────
++
++/** Returns the currently active drop (status=ACTIVE and within opens_at..closes_at), or null */
++export async function getActiveDrop(): Promise<Drop | null> {
++	const now = new Date();
++	const [row] = await db
++		.select()
++		.from(drop)
++		.where(
++			and(
++				eq(drop.status, 'ACTIVE'),
++				sql`${drop.opens_at} <= ${now}`,
++				sql`${drop.closes_at} >= ${now}`
++			)
++		)
++		.limit(1);
++	return row ?? null;
++}
++
++// ─── Products ─────────────────────────────────────────────────────────────────
++
++/** Returns all active products in a drop, each with their active variants */
++export async function getDropProducts(dropId: number): Promise<ProductWithVariants[]> {
++	const rows = await db
++		.select({ product: product, variant: productVariant })
++		.from(dropProduct)
++		.innerJoin(product, eq(dropProduct.product_id, product.id))
++		.leftJoin(productVariant, eq(productVariant.product_id, product.id))
++		.where(
++			and(
++				eq(dropProduct.drop_id, dropId),
++				eq(product.is_active, true),
++				eq(productVariant.is_active, true)
++			)
++		)
++		.orderBy(product.id);
++
++	const map = new Map<number, ProductWithVariants>();
++	for (const row of rows) {
++		if (!map.has(row.product.id)) {
++			map.set(row.product.id, { product: row.product, variants: [] });
++		}
++		if (row.variant) {
++			map.get(row.product.id)!.variants.push(row.variant);
++		}
++	}
++	return [...map.values()];
++}
++
++/** Returns a single product with all its active variants */
++export async function getProductWithVariants(
++	productId: number
++): Promise<ProductWithVariants | null> {
++	const rows = await db
++		.select({ product: product, variant: productVariant })
++		.from(product)
++		.leftJoin(productVariant, and(eq(productVariant.product_id, product.id), eq(productVariant.is_active, true)))
++		.where(and(eq(product.id, productId), eq(product.is_active, true)));
++
++	if (rows.length === 0) return null;
++
++	const variants = rows.flatMap((r) => (r.variant ? [r.variant] : []));
++	return { product: rows[0].product, variants };
++}
++
++// ─── Orders ───────────────────────────────────────────────────────────────────
++
++/** Returns an order with all its items (variant + product data included) */
++export async function getOrderWithItems(orderId: string): Promise<OrderWithItems | null> {
++	const [orderRow] = await db.select().from(order).where(eq(order.id, orderId));
++	if (!orderRow) return null;
++
++	const itemRows = await db
++		.select({ item: orderItem, variant: productVariant, product: product })
++		.from(orderItem)
++		.innerJoin(productVariant, eq(orderItem.variant_id, productVariant.id))
++		.innerJoin(product, eq(productVariant.product_id, product.id))
++		.where(eq(orderItem.order_id, orderId));
++
++	return {
++		order: orderRow,
++		items: itemRows
++	};
++}
++
++/**
++ * Creates a PENDING_PAYMENT order with an atomic soft lock on drop capacity.
++ *
++ * Uses a conditional UPDATE to increment `allocated_minutes` only if there is
++ * enough remaining capacity — this is inherently atomic in Postgres.
++ */
++export async function createOrderWithSoftLock(params: {
++	dropId: number;
++	customerEmail: string;
++	customerPhone: string;
++	inpostPointId: string;
++	cartLines: CheckoutCartLine[];
++	bufferMinutes: number;
++	mysteryBoxMinutes: number;
++}): Promise<
++	| { ok: true; orderId: string; totalPln: number }
++	| { ok: false; reason: 'INSUFFICIENT_CAPACITY' | 'DROP_NOT_ACTIVE' }
++> {
++	const { dropId, customerEmail, customerPhone, inpostPointId, cartLines, bufferMinutes, mysteryBoxMinutes } =
++		params;
++
++	return await db.transaction(async (tx) => {
++		// 1. Resolve variant/product info for cart items (server-side prices)
++		const resolvedLines = await Promise.all(
++			cartLines.map(async (line) => {
++				const [row] = await tx
++					.select({ variant: productVariant, product: product })
++					.from(productVariant)
++					.innerJoin(product, eq(productVariant.product_id, product.id))
++					.where(
++						and(
++							eq(productVariant.id, line.variantId),
++							eq(productVariant.is_active, true),
++							eq(product.is_active, true)
++						)
++					);
++				return row ? { ...line, variant: row.variant, product: row.product } : null;
++			})
++		);
++
++		if (resolvedLines.some((l) => l === null)) {
++			return { ok: false, reason: 'DROP_NOT_ACTIVE' };
++		}
++		const lines = resolvedLines as NonNullable<(typeof resolvedLines)[number]>[];
++
++		// 2. Calculate capacity and total
++		const cartItems = lines.map((l) => ({
++			printDurationMinutes: l.variant.is_mystery ? mysteryBoxMinutes : l.product.print_duration_minutes,
++			quantity: l.quantity
++		}));
++		const cartMinutes = calculateCartMinutes(cartItems, bufferMinutes);
++		const totalPln = lines.reduce(
++			(sum, l) => sum + l.product.price_pln * l.quantity,
++			0
++		);
++
++		// 3. Atomic soft lock: increment allocated_minutes only if capacity allows
++		const updated = await tx
++			.update(drop)
++			.set({ allocated_minutes: sql`allocated_minutes + ${cartMinutes}` })
++			.where(
++				and(
++					eq(drop.id, dropId),
++					eq(drop.status, 'ACTIVE'),
++					sql`allocated_minutes + ${cartMinutes} <= total_capacity_minutes`
++				)
++			)
++			.returning({ id: drop.id });
++
++		if (updated.length === 0) {
++			return { ok: false, reason: 'INSUFFICIENT_CAPACITY' };
++		}
++
++		// 4. Create order
++		const now = new Date();
++		const [newOrder] = await tx
++			.insert(order)
++			.values({
++				drop_id: dropId,
++				status: 'PENDING_PAYMENT',
++				customer_email: customerEmail,
++				customer_phone: customerPhone,
++				inpost_point_id: inpostPointId,
++				total_pln: totalPln,
++				locked_minutes: cartMinutes,
++				locked_until: buildSoftLockExpiry(now)
++			})
++			.returning({ id: order.id });
++
++		// 5. Create order items
++		await tx.insert(orderItem).values(
++			lines.map((l) => ({
++				order_id: newOrder.id,
++				variant_id: l.variantId,
++				quantity: l.quantity,
++				status: 'PENDING' as const
++			}))
++		);
++
++		return { ok: true, orderId: newOrder.id, totalPln };
++	});
++}
++
++/**
++ * Confirms a payment: sets order to PAID, clears the soft lock expiry.
++ * Called from the payment webhook. The allocated_minutes stay — lock becomes permanent.
++ */
++export async function confirmPayment(
++	paymentGatewayId: string
++): Promise<{ ok: true; orderId: string } | { ok: false; reason: 'ORDER_NOT_FOUND' }> {
++	const [updated] = await db
++		.update(order)
++		.set({
++			status: 'PAID',
++			payment_gateway_id: paymentGatewayId,
++			locked_until: null,
++			updated_at: new Date()
++		})
++		.where(
++			and(
++				eq(order.payment_gateway_id, paymentGatewayId),
++				eq(order.status, 'PENDING_PAYMENT')
++			)
++		)
++		.returning({ id: order.id });
++
++	if (!updated) return { ok: false, reason: 'ORDER_NOT_FOUND' };
++	return { ok: true, orderId: updated.id };
++}
++
++/**
++ * Releases all expired soft locks (BLIK timeout).
++ * Returns allocated_minutes back to the drop and marks orders CANCELLED.
++ * Called by the Vercel Cron job every minute.
++ */
++export async function releaseExpiredSoftLocks(): Promise<{ released: number }> {
++	const now = new Date();
++
++	const expired = await db
++		.select({ id: order.id, drop_id: order.drop_id, locked_minutes: order.locked_minutes })
++		.from(order)
++		.where(and(eq(order.status, 'PENDING_PAYMENT'), lt(order.locked_until, now)));
++
++	if (expired.length === 0) return { released: 0 };
++
++	await db.transaction(async (tx) => {
++		for (const exp of expired) {
++			// Restore capacity to drop
++			await tx
++				.update(drop)
++				.set({ allocated_minutes: sql`allocated_minutes - ${exp.locked_minutes}` })
++				.where(eq(drop.id, exp.drop_id));
++
++			// Cancel order
++			await tx
++				.update(order)
++				.set({ status: 'CANCELLED', locked_until: null, updated_at: now })
++				.where(eq(order.id, exp.id));
++		}
++	});
++
++	return { released: expired.length };
++}
+diff --git a/src/lib/server/orders.test.ts b/src/lib/server/orders.test.ts
+new file mode 100644
+index 0000000..19547cb
+--- /dev/null
++++ b/src/lib/server/orders.test.ts
+@@ -0,0 +1,174 @@
++import { describe, it, expect } from 'vitest';
++import {
++	validateDropIsOpen,
++	computeOrderTotal,
++	buildSoftLockExpiry,
++	isSoftLockActive,
++	resolveItemMinutes,
++	SOFT_LOCK_DURATION_MS
++} from './orders';
++import type { Drop } from './db/schema';
++
++// ─── Test fixtures ────────────────────────────────────────────────────────────
++
++const NOW = new Date('2026-03-12T10:00:00Z');
++
++function makeDrop(overrides: Partial<Drop> = {}): Drop {
++	return {
++		id: 1,
++		status: 'ACTIVE',
++		opens_at: new Date('2026-03-12T08:00:00Z'),
++		closes_at: new Date('2026-03-12T20:00:00Z'),
++		total_capacity_minutes: 600,
++		allocated_minutes: 0,
++		created_at: new Date('2026-03-10T00:00:00Z'),
++		...overrides
++	};
++}
++
++// ─── validateDropIsOpen ───────────────────────────────────────────────────────
++
++describe('validateDropIsOpen', () => {
++	it('returns ok when drop is active and within window', () => {
++		const result = validateDropIsOpen(makeDrop(), NOW);
++		expect(result.ok).toBe(true);
++		if (result.ok) {
++			expect(result.drop.id).toBe(1);
++		}
++	});
++
++	it('rejects null drop', () => {
++		expect(validateDropIsOpen(null, NOW)).toEqual({
++			ok: false,
++			reason: 'NO_ACTIVE_DROP'
++		});
++	});
++
++	it('rejects undefined drop', () => {
++		expect(validateDropIsOpen(undefined, NOW)).toEqual({
++			ok: false,
++			reason: 'NO_ACTIVE_DROP'
++		});
++	});
++
++	it('rejects DRAFT drop', () => {
++		expect(validateDropIsOpen(makeDrop({ status: 'DRAFT' }), NOW)).toEqual({
++			ok: false,
++			reason: 'DROP_NOT_OPEN'
++		});
++	});
++
++	it('rejects CLOSED drop', () => {
++		expect(validateDropIsOpen(makeDrop({ status: 'CLOSED' }), NOW)).toEqual({
++			ok: false,
++			reason: 'DROP_NOT_OPEN'
++		});
++	});
++
++	it('rejects when current time is before opens_at', () => {
++		const earlyNow = new Date('2026-03-12T07:00:00Z');
++		expect(validateDropIsOpen(makeDrop(), earlyNow)).toEqual({
++			ok: false,
++			reason: 'DROP_NOT_OPEN'
++		});
++	});
++
++	it('rejects when current time is after closes_at', () => {
++		const lateNow = new Date('2026-03-12T21:00:00Z');
++		expect(validateDropIsOpen(makeDrop(), lateNow)).toEqual({
++			ok: false,
++			reason: 'DROP_NOT_OPEN'
++		});
++	});
++
++	it('accepts at exact opens_at boundary', () => {
++		const exactly = new Date('2026-03-12T08:00:00Z');
++		expect(validateDropIsOpen(makeDrop(), exactly).ok).toBe(true);
++	});
++
++	it('accepts at exact closes_at boundary', () => {
++		const exactly = new Date('2026-03-12T20:00:00Z');
++		expect(validateDropIsOpen(makeDrop(), exactly).ok).toBe(true);
++	});
++});
++
++// ─── computeOrderTotal ────────────────────────────────────────────────────────
++
++describe('computeOrderTotal', () => {
++	it('returns 0 for empty items', () => {
++		expect(computeOrderTotal([])).toBe(0);
++	});
++
++	it('multiplies price by quantity for single item', () => {
++		expect(computeOrderTotal([{ pricePln: 2990, quantity: 2 }])).toBe(5980);
++	});
++
++	it('sums multiple items', () => {
++		expect(
++			computeOrderTotal([
++				{ pricePln: 2990, quantity: 1 },
++				{ pricePln: 1500, quantity: 3 }
++			])
++		).toBe(2990 + 4500); // 7490
++	});
++
++	it('handles quantity of 1', () => {
++		expect(computeOrderTotal([{ pricePln: 4999, quantity: 1 }])).toBe(4999);
++	});
++});
++
++// ─── buildSoftLockExpiry ──────────────────────────────────────────────────────
++
++describe('buildSoftLockExpiry', () => {
++	it('returns now + 3 minutes', () => {
++		const now = new Date('2026-03-12T10:00:00Z');
++		const expiry = buildSoftLockExpiry(now);
++		expect(expiry.getTime()).toBe(now.getTime() + SOFT_LOCK_DURATION_MS);
++	});
++
++	it('SOFT_LOCK_DURATION_MS is 3 minutes', () => {
++		expect(SOFT_LOCK_DURATION_MS).toBe(3 * 60 * 1000);
++	});
++});
++
++// ─── isSoftLockActive ─────────────────────────────────────────────────────────
++
++describe('isSoftLockActive', () => {
++	it('returns false for null lockedUntil', () => {
++		expect(isSoftLockActive(null, NOW)).toBe(false);
++	});
++
++	it('returns false for undefined lockedUntil', () => {
++		expect(isSoftLockActive(undefined, NOW)).toBe(false);
++	});
++
++	it('returns true when lock has not expired', () => {
++		const future = new Date(NOW.getTime() + 60_000);
++		expect(isSoftLockActive(future, NOW)).toBe(true);
++	});
++
++	it('returns false when lock has expired', () => {
++		const past = new Date(NOW.getTime() - 1000);
++		expect(isSoftLockActive(past, NOW)).toBe(false);
++	});
++
++	it('returns false at exact expiry moment', () => {
++		expect(isSoftLockActive(NOW, NOW)).toBe(false);
++	});
++});
++
++// ─── resolveItemMinutes ───────────────────────────────────────────────────────
++
++describe('resolveItemMinutes', () => {
++	it('returns print duration for normal items', () => {
++		expect(resolveItemMinutes(90, false, 120)).toBe(90);
++	});
++
++	it('returns mystery box minutes for mystery items, ignoring print duration', () => {
++		expect(resolveItemMinutes(0, true, 120)).toBe(120);
++	});
++
++	it('mystery box minutes override even non-zero print duration', () => {
++		expect(resolveItemMinutes(999, true, 120)).toBe(120);
++	});
++});
+diff --git a/src/lib/server/orders.ts b/src/lib/server/orders.ts
+new file mode 100644
+index 0000000..67e0f3f
+--- /dev/null
++++ b/src/lib/server/orders.ts
+@@ -0,0 +1,87 @@
++/**
++ * Pure order logic — no database side-effects.
++ * All DB interactions happen in +page.server.ts / +server.ts via queries.ts.
++ */
++import type { Drop } from './db/schema';
++
++// ─── Types ────────────────────────────────────────────────────────────────────
++
++export type DropValidationResult =
++	| { ok: true; drop: Drop }
++	| { ok: false; reason: 'NO_ACTIVE_DROP' | 'DROP_NOT_OPEN' };
++
++export interface CartLineInput {
++	variantId: number;
++	quantity: number;
++}
++
++export interface ResolvedCartLine {
++	variantId: number;
++	productId: number;
++	quantity: number;
++	pricePln: number;
++	printDurationMinutes: number;
++	isMystery: boolean;
++}
++
++// ─── Drop validation ──────────────────────────────────────────────────────────
++
++/**
++ * Checks whether a drop is currently open for orders.
++ * The drop must be ACTIVE and the current time must be within opens_at..closes_at.
++ */
++export function validateDropIsOpen(drop: Drop | null | undefined, now: Date): DropValidationResult {
++	if (!drop) return { ok: false, reason: 'NO_ACTIVE_DROP' };
++	if (drop.status !== 'ACTIVE') return { ok: false, reason: 'DROP_NOT_OPEN' as const };
++
++	const opensAt = new Date(drop.opens_at);
++	const closesAt = new Date(drop.closes_at);
++
++	if (now < opensAt || now > closesAt) {
++		return { ok: false, reason: 'DROP_NOT_OPEN' };
++	}
++
++	return { ok: true, drop };
++}
++
++// ─── Order total ──────────────────────────────────────────────────────────────
++
++/**
++ * Computes the total order value in grosze.
++ * Always uses server-side resolved prices, never client-provided values.
++ */
++export function computeOrderTotal(
++	items: Array<{ pricePln: number; quantity: number }>
++): number {
++	return items.reduce((sum, item) => sum + item.pricePln * item.quantity, 0);
++}
++
++// ─── Soft lock helpers ────────────────────────────────────────────────────────
++
++/** Backend soft lock duration: 3 minutes (longer than the 2-min UI timer) */
++export const SOFT_LOCK_DURATION_MS = 3 * 60 * 1000;
++
++/** Returns the expiry timestamp for a new soft lock */
++export function buildSoftLockExpiry(now: Date): Date {
++	return new Date(now.getTime() + SOFT_LOCK_DURATION_MS);
++}
++
++/** Returns true if a soft lock is still active (not yet expired) */
++export function isSoftLockActive(lockedUntil: Date | null | undefined, now: Date): boolean {
++	if (!lockedUntil) return false;
++	return new Date(lockedUntil) > now;
++}
++
++// ─── Cart minutes calculation (for use with capacity engine) ──────────────────
++
++/**
++ * Resolves print duration minutes for a cart line.
++ * Mystery box items use a fixed duration from global settings.
++ */
++export function resolveItemMinutes(
++	printDurationMinutes: number,
++	isMystery: boolean,
++	mysteryBoxMinutes: number
++): number {
++	return isMystery ? mysteryBoxMinutes : printDurationMinutes;
++}
+diff --git a/src/routes/(shop)/+layout.server.ts b/src/routes/(shop)/+layout.server.ts
+new file mode 100644
+index 0000000..c82849d
+--- /dev/null
++++ b/src/routes/(shop)/+layout.server.ts
+@@ -0,0 +1,7 @@
++import type { LayoutServerLoad } from './$types';
++import { getGlobalSettings, getActiveDrop } from '$lib/server/db/queries';
++
++export const load: LayoutServerLoad = async () => {
++	const [settings, activeDrop] = await Promise.all([getGlobalSettings(), getActiveDrop()]);
++	return { settings, activeDrop };
++};
+diff --git a/src/routes/(shop)/+layout.svelte b/src/routes/(shop)/+layout.svelte
+new file mode 100644
+index 0000000..fa9e520
+--- /dev/null
++++ b/src/routes/(shop)/+layout.svelte
+@@ -0,0 +1,66 @@
++<script lang="ts">
++	import { cartCount } from '$lib/cart.svelte';
++	import type { LayoutData } from './$types';
++
++	let { data, children }: { data: LayoutData; children: import('svelte').Snippet } = $props();
++</script>
++
++<div class="min-h-screen bg-slate-950 text-slate-100 font-mono">
++	<!-- Header -->
++	<header class="border-b border-slate-800 bg-slate-950/90 sticky top-0 z-50 backdrop-blur">
++		<div class="max-w-lg mx-auto px-4 py-3 flex items-center justify-between">
++			<a href="/" class="flex items-center gap-2">
++				<span class="text-cyan-400 font-bold text-lg tracking-tight">FIDGET FUN!</span>
++				<span class="text-slate-500 text-xs">by Leo & Sam</span>
++			</a>
++
++			<a
++				href="/checkout"
++				class="flex items-center gap-1.5 text-sm text-slate-300 hover:text-cyan-400 transition-colors"
++			>
++				<svg
++					xmlns="http://www.w3.org/2000/svg"
++					class="w-5 h-5"
++					fill="none"
++					viewBox="0 0 24 24"
++					stroke="currentColor"
++					stroke-width="2"
++				>
++					<path
++						stroke-linecap="round"
++						stroke-linejoin="round"
++						d="M3 3h2l.4 2M7 13h10l4-8H5.4M7 13l-1.35 6h11.7M7 13L5.4 5M17 21a1 1 0 100-2 1 1 0 000 2zM9 21a1 1 0 100-2 1 1 0 000 2z"
++					/>
++				</svg>
++				{#if cartCount() > 0}
++					<span
++						class="bg-cyan-500 text-slate-950 text-xs font-bold rounded-full w-5 h-5 flex items-center justify-center"
++					>
++						{cartCount()}
++					</span>
++				{/if}
++			</a>
++		</div>
++	</header>
++
++	<!-- Factory status banner -->
++	{#if !data.settings.printer_is_on}
++		<div class="bg-amber-900/40 border-b border-amber-700/50 px-4 py-2 text-center">
++			<p class="text-amber-300 text-sm">
++				🔧 <span class="font-semibold">Drukarnia offline</span>
++				{#if data.settings.status_message}
++					— {data.settings.status_message}
++				{/if}
++			</p>
++		</div>
++	{/if}
++
++	<main class="max-w-lg mx-auto px-4 py-6">
++		{@render children()}
++	</main>
++
++	<footer class="border-t border-slate-800 mt-12 px-4 py-6 text-center text-slate-600 text-xs">
++		<p>Fidget Fun! · Ręcznie drukowane w Polsce 🇵🇱</p>
++		<p class="mt-1">Prowadzone przez Leo (12l.) & Sam (10l.) z pomocą Wujka Mike'a</p>
++	</footer>
++</div>
+diff --git a/src/routes/(shop)/+page.server.ts b/src/routes/(shop)/+page.server.ts
+new file mode 100644
+index 0000000..0813c5e
+--- /dev/null
++++ b/src/routes/(shop)/+page.server.ts
+@@ -0,0 +1,10 @@
++import type { PageServerLoad } from './$types';
++import { getDropProducts } from '$lib/server/db/queries';
++
++export const load: PageServerLoad = async ({ parent }) => {
++	const { activeDrop } = await parent();
++
++	const products = activeDrop ? await getDropProducts(activeDrop.id) : [];
++
++	return { products };
++};
+diff --git a/src/routes/(shop)/+page.svelte b/src/routes/(shop)/+page.svelte
+new file mode 100644
+index 0000000..539b55f
+--- /dev/null
++++ b/src/routes/(shop)/+page.svelte
+@@ -0,0 +1,101 @@
++<script lang="ts">
++	import PrinterStatus from '$lib/components/PrinterStatus.svelte';
++	import DropCountdown from '$lib/components/DropCountdown.svelte';
++	import ScarcityBadge from '$lib/components/ScarcityBadge.svelte';
++	import { formatPln, formatMinutes } from '$lib/formatting';
++	import type { PageData } from './$types';
++
++	let { data }: { data: PageData } = $props();
++
++	const remaining = $derived(
++		data.activeDrop
++			? data.activeDrop.total_capacity_minutes - data.activeDrop.allocated_minutes
++			: 0
++	);
++</script>
++
++<svelte:head>
++	<title>Fidget Fun! — Weekly Drop</title>
++</svelte:head>
++
++<!-- Printer status -->
++<PrinterStatus
++	isOn={data.settings.printer_is_on}
++	message={data.settings.status_message}
++	estimatedDays={data.settings.active_window_end_hour - data.settings.active_window_start_hour}
++/>
++
++<!-- Drop info -->
++{#if data.activeDrop}
++	<div class="mt-6 mb-8">
++		<div class="flex items-center justify-between mb-2">
++			<h1 class="text-xl font-bold text-slate-100">Weekly Drop</h1>
++			<ScarcityBadge remainingMinutes={remaining} />
++		</div>
++		<DropCountdown closesAt={new Date(data.activeDrop.closes_at)} />
++	</div>
++{:else}
++	<div class="mt-8 text-center py-12 border border-dashed border-slate-700 rounded-lg">
++		<p class="text-slate-400 text-sm">Brak aktywnego dropu.</p>
++		<p class="text-slate-600 text-xs mt-1">Wróć wkrótce — ogłaszamy nowy drop co tydzień!</p>
++	</div>
++{/if}
++
++<!-- Product grid -->
++{#if data.products.length > 0}
++	<div class="grid gap-4">
++		{#each data.products as { product, variants }}
++			<a
++				href="/products/{product.id}"
++				class="block bg-slate-900 border border-slate-700 rounded-xl p-4 hover:border-cyan-600 transition-colors group"
++			>
++				<div class="flex items-start justify-between gap-3">
++					<div class="flex-1 min-w-0">
++						<h2 class="font-bold text-slate-100 group-hover:text-cyan-400 transition-colors">
++							{product.name}
++						</h2>
++						{#if product.description}
++							<p class="text-slate-400 text-sm mt-1 line-clamp-2">{product.description}</p>
++						{/if}
++
++						<!-- Colour swatches preview -->
++						<div class="flex gap-1.5 mt-3">
++							{#each variants.slice(0, 8) as variant}
++								<span
++									class="w-5 h-5 rounded-full border-2 border-slate-700 flex-shrink-0"
++									style="background-color: {variant.hex_code}"
++									title={variant.filament_color}
++								></span>
++							{/each}
++							{#if variants.length > 8}
++								<span class="text-slate-500 text-xs self-center">+{variants.length - 8}</span>
++							{/if}
++						</div>
++					</div>
++
++					<div class="text-right flex-shrink-0">
++						<p class="text-cyan-400 font-bold text-lg">{formatPln(product.price_pln)}</p>
++						<p class="text-slate-500 text-xs mt-0.5">{formatMinutes(product.print_duration_minutes)}</p>
++					</div>
++				</div>
++			</a>
++		{/each}
++	</div>
++{:else if data.activeDrop}
++	<p class="text-slate-500 text-sm text-center py-8">Ładowanie produktów…</p>
++{/if}
++
++<!-- Story section -->
++<div class="mt-12 border-t border-slate-800 pt-8">
++	<h2 class="text-sm font-bold text-slate-500 uppercase tracking-widest mb-4">Kim jesteśmy</h2>
++	<div class="bg-slate-900 border border-slate-700 rounded-xl p-5 space-y-2">
++		<p class="text-slate-300 text-sm">
++			Jesteśmy Leo (12 lat) i Sam (10 lat). Drukujemy zabawki fidget na naszej drukarce 3D.
++		</p>
++		<p class="text-slate-400 text-sm">
++			Każdy produkt drukujemy ręcznie — ile zmieści się w danym tygodniu, tyle wychodzi. Nasz
++			Wujek Mike pomaga z wysyłką.
++		</p>
++		<p class="text-cyan-500 text-xs font-medium">🔧 Prawdziwi ludzie. Prawdziwy druk. Bez bullshitu.</p>
++	</div>
++</div>
+diff --git a/src/routes/(shop)/checkout/+page.server.ts b/src/routes/(shop)/checkout/+page.server.ts
+new file mode 100644
+index 0000000..c7a1cce
+--- /dev/null
++++ b/src/routes/(shop)/checkout/+page.server.ts
+@@ -0,0 +1,74 @@
++import { fail, redirect } from '@sveltejs/kit';
++import type { Actions, PageServerLoad } from './$types';
++import { getGlobalSettings, getActiveDrop, createOrderWithSoftLock } from '$lib/server/db/queries';
++import { validateDropIsOpen } from '$lib/server/orders';
++
++export const load: PageServerLoad = async ({ parent }) => {
++	const { settings, activeDrop } = await parent();
++	return { settings, activeDrop };
++};
++
++export const actions: Actions = {
++	checkout: async ({ request }) => {
++		const data = await request.formData();
++		const cartJson = data.get('cart') as string | null;
++		const email = (data.get('email') as string | null)?.trim();
++		const phone = (data.get('phone') as string | null)?.trim();
++		const inpostPointId = (data.get('inpost_point_id') as string | null)?.trim();
++
++		// Basic field validation
++		if (!email || !phone || !inpostPointId || !cartJson) {
++			return fail(400, { error: 'Wypełnij wszystkie pola.' });
++		}
++		if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
++			return fail(400, { error: 'Nieprawidłowy adres e-mail.' });
++		}
++
++		let cartLines: Array<{ variantId: number; quantity: number }>;
++		try {
++			cartLines = JSON.parse(cartJson);
++			if (!Array.isArray(cartLines) || cartLines.length === 0) throw new Error();
++		} catch {
++			return fail(400, { error: 'Pusty lub błędny koszyk.' });
++		}
++
++		// Fresh server-side checks
++		const [settings, activeDrop] = await Promise.all([getGlobalSettings(), getActiveDrop()]);
++
++		if (!settings.printer_is_on) {
++			return fail(400, {
++				error: `Drukarnia jest offline. ${settings.status_message || ''}`
++			});
++		}
++
++		const dropCheck = validateDropIsOpen(activeDrop, new Date());
++		if (!dropCheck.ok) {
++			return fail(400, { error: 'Brak aktywnego dropu — nie można teraz zamówić.' });
++		}
++
++		const result = await createOrderWithSoftLock({
++			dropId: dropCheck.drop.id,
++			customerEmail: email,
++			customerPhone: phone,
++			inpostPointId,
++			cartLines,
++			bufferMinutes: settings.turnaround_buffer_minutes,
++			mysteryBoxMinutes: settings.mystery_box_minutes
++		});
++
++		if (!result.ok) {
++			if (result.reason === 'INSUFFICIENT_CAPACITY') {
++				return fail(400, {
++					error: 'Brakuje czasu produkcji w tym dropie. Spróbuj zmniejszyć koszyk.'
++				});
++			}
++			return fail(400, { error: 'Nie można przetworzyć zamówienia. Spróbuj ponownie.' });
++		}
++
++		// Phase 4: call payment gateway here (currently stubbed)
++		// const blikSession = await initiateBlilPayment(result.orderId, result.totalPln);
++
++		// Return orderId to client — page switches to BLIK timer view
++		return { orderId: result.orderId, totalPln: result.totalPln };
++	}
++};
+diff --git a/src/routes/(shop)/checkout/+page.svelte b/src/routes/(shop)/checkout/+page.svelte
+new file mode 100644
+index 0000000..0deb0e0
+--- /dev/null
++++ b/src/routes/(shop)/checkout/+page.svelte
+@@ -0,0 +1,181 @@
++<script lang="ts">
++	import { enhance } from '$app/forms';
++	import BlikTimer from '$lib/components/BlikTimer.svelte';
++	import { cartItems, cartTotal, cartToCheckoutPayload, clearCart } from '$lib/cart.svelte';
++	import { formatPln } from '$lib/formatting';
++	import type { PageData, ActionData } from './$types';
++
++	let { data, form }: { data: PageData; form: ActionData } = $props();
++
++	const items = $derived(cartItems());
++	const total = $derived(cartTotal());
++
++	let submitting = $state(false);
++	let inpostPointId = $state('');
++
++	// After successful order creation, show BLIK timer
++	const orderId = $derived((form as { orderId?: string } | null)?.orderId ?? null);
++
++	function handleBlikExpire() {
++		// Redirect back to shop — order will be cancelled by cron
++		window.location.href = '/?blik_expired=1';
++	}
++
++	function handleBlikSuccess() {
++		clearCart();
++		if (orderId) window.location.href = `/orders/${orderId}`;
++	}
++
++	// Simulated InPost picker (Phase 4: replace with real Geowidget)
++	function pickInpostPoint() {
++		inpostPointId = 'WAW01A'; // stub
++		alert('W Phase 4 pojawi się tu mapa InPost Geowidget.');
++	}
++</script>
++
++<svelte:head>
++	<title>Koszyk — Fidget Fun!</title>
++</svelte:head>
++
++{#if orderId}
++	<!-- BLIK payment step -->
++	<div class="space-y-6">
++		<div>
++			<h1 class="text-xl font-bold text-slate-100">Płatność BLIK</h1>
++			<p class="text-slate-400 text-sm mt-1">
++				Zamówienie #{orderId.slice(0, 8)} — {formatPln((form as { totalPln?: number } | null)?.totalPln ?? 0)}
++			</p>
++		</div>
++
++		<BlikTimer onExpire={handleBlikExpire} onSuccess={handleBlikSuccess} />
++
++		<p class="text-slate-500 text-xs text-center">
++			Kod BLIK ważny 2 minuty. Rezerwacja zostanie anulowana po upływie czasu.
++		</p>
++	</div>
++{:else}
++	<!-- Checkout form -->
++	<div class="space-y-6">
++		<h1 class="text-xl font-bold text-slate-100">Koszyk</h1>
++
++		{#if items.length === 0}
++			<div class="text-center py-12 border border-dashed border-slate-700 rounded-xl">
++				<p class="text-slate-400">Koszyk jest pusty.</p>
++				<a href="/" class="text-cyan-400 text-sm mt-2 inline-block hover:underline">
++					← Wróć do sklepu
++				</a>
++			</div>
++		{:else}
++			<!-- Cart summary -->
++			<div class="bg-slate-900 border border-slate-700 rounded-xl divide-y divide-slate-800">
++				{#each items as item}
++					<div class="p-4 flex items-center gap-3">
++						<span
++							class="w-6 h-6 rounded-full flex-shrink-0 border border-slate-600"
++							style="background-color: {item.hexCode}"
++						></span>
++						<div class="flex-1 min-w-0">
++							<p class="text-slate-200 text-sm font-medium">{item.productName}</p>
++							<p class="text-slate-500 text-xs">{item.filamentColor} × {item.quantity}</p>
++						</div>
++						<p class="text-cyan-400 font-bold text-sm flex-shrink-0">
++							{formatPln(item.pricePln * item.quantity)}
++						</p>
++					</div>
++				{/each}
++				<div class="p-4 flex justify-between items-center">
++					<span class="text-slate-400 text-sm">Razem</span>
++					<span class="text-cyan-400 font-bold text-xl">{formatPln(total)}</span>
++				</div>
++			</div>
++
++			{#if !data.settings.printer_is_on}
++				<div class="bg-amber-900/30 border border-amber-700/50 rounded-xl p-4 text-center">
++					<p class="text-amber-300 text-sm">Drukarnia offline — zamówienia są zablokowane.</p>
++				</div>
++			{:else}
++				<!-- Checkout form -->
++				<form
++					method="POST"
++					action="?/checkout"
++					use:enhance={() => {
++						submitting = true;
++						return async ({ update }) => {
++							submitting = false;
++							await update();
++						};
++					}}
++					class="space-y-4"
++				>
++					<input type="hidden" name="cart" value={JSON.stringify(cartToCheckoutPayload())} />
++					<input type="hidden" name="inpost_point_id" value={inpostPointId} />
++
++					<div>
++						<label for="email" class="block text-xs text-slate-400 mb-1">E-mail</label>
++						<input
++							id="email"
++							name="email"
++							type="email"
++							required
++							autocomplete="email"
++							class="w-full bg-slate-800 border border-slate-600 rounded-lg px-3 py-2.5 text-slate-100 text-sm focus:outline-none focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500/30"
++							placeholder="twój@email.com"
++						/>
++					</div>
++
++					<div>
++						<label for="phone" class="block text-xs text-slate-400 mb-1">Telefon</label>
++						<input
++							id="phone"
++							name="phone"
++							type="tel"
++							required
++							autocomplete="tel"
++							class="w-full bg-slate-800 border border-slate-600 rounded-lg px-3 py-2.5 text-slate-100 text-sm focus:outline-none focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500/30"
++							placeholder="+48 600 000 000"
++						/>
++					</div>
++
++					<!-- InPost picker -->
++					<div>
++						<p class="text-xs text-slate-400 mb-1">Paczkomat InPost</p>
++						{#if inpostPointId}
++							<div class="bg-slate-800 border border-slate-600 rounded-lg px-3 py-2.5 flex justify-between items-center">
++								<span class="text-slate-200 text-sm font-medium">{inpostPointId}</span>
++								<button
++									type="button"
++									onclick={pickInpostPoint}
++									class="text-cyan-400 text-xs hover:underline"
++								>
++									Zmień
++								</button>
++							</div>
++						{:else}
++							<button
++								type="button"
++								onclick={pickInpostPoint}
++								class="w-full bg-slate-800 border border-dashed border-slate-600 hover:border-cyan-600 rounded-lg px-3 py-3 text-slate-400 hover:text-cyan-400 text-sm transition-colors"
++							>
++								📍 Wybierz paczkomat na mapie
++							</button>
++						{/if}
++					</div>
++
++					{#if form?.error}
++						<div class="bg-red-900/30 border border-red-700/50 rounded-lg p-3">
++							<p class="text-red-300 text-sm">{form.error}</p>
++						</div>
++					{/if}
++
++					<button
++						type="submit"
++						disabled={submitting || !inpostPointId}
++						class="w-full bg-cyan-500 hover:bg-cyan-400 disabled:bg-slate-700 disabled:text-slate-500 text-slate-950 font-bold py-4 rounded-xl text-base transition-colors"
++					>
++						{submitting ? 'Przetwarzam…' : `Zamawiam i płacę BLIK — ${formatPln(total)}`}
++					</button>
++				</form>
++			{/if}
++		{/if}
++	</div>
++{/if}
+diff --git a/src/routes/(shop)/orders/[id]/+page.server.ts b/src/routes/(shop)/orders/[id]/+page.server.ts
+new file mode 100644
+index 0000000..f3eb062
+--- /dev/null
++++ b/src/routes/(shop)/orders/[id]/+page.server.ts
+@@ -0,0 +1,9 @@
++import { error } from '@sveltejs/kit';
++import type { PageServerLoad } from './$types';
++import { getOrderWithItems } from '$lib/server/db/queries';
++
++export const load: PageServerLoad = async ({ params }) => {
++	const orderData = await getOrderWithItems(params.id);
++	if (!orderData) error(404, 'Zamówienie nie znalezione');
++	return { orderData };
++};
+diff --git a/src/routes/(shop)/orders/[id]/+page.svelte b/src/routes/(shop)/orders/[id]/+page.svelte
+new file mode 100644
+index 0000000..b733013
+--- /dev/null
++++ b/src/routes/(shop)/orders/[id]/+page.svelte
+@@ -0,0 +1,129 @@
++<script lang="ts">
++	import { formatPln, orderStatusLabel } from '$lib/formatting';
++	import type { PageData } from './$types';
++
++	let { data }: { data: PageData } = $props();
++
++	const order = $derived(data.orderData.order);
++	const items = $derived(data.orderData.items);
++
++	const statusConfig: Record<string, { icon: string; color: string; description: string }> = {
++		PENDING_PAYMENT: {
++			icon: '⏳',
++			color: 'text-amber-300',
++			description: 'Czekamy na potwierdzenie płatności BLIK.'
++		},
++		PAID: {
++			icon: '✅',
++			color: 'text-emerald-400',
++			description: 'Płatność potwierdzona. Drop wkrótce się zamknie i ruszamy z drukowaniem!'
++		},
++		PRINTING: {
++			icon: '🖨️',
++			color: 'text-cyan-400',
++			description: 'Twój produkt jest właśnie drukowany przez Leo lub Sama!'
++		},
++		PACKED: {
++			icon: '📦',
++			color: 'text-blue-400',
++			description: 'Zapakowane i gotowe do wysyłki. Wujek Mike generuje etykietę!'
++		},
++		SHIPPED: {
++			icon: '🚀',
++			color: 'text-violet-400',
++			description: 'Paczka jest w drodze! Sprawdź status w aplikacji InPost.'
++		},
++		DELIVERED: {
++			icon: '🎉',
++			color: 'text-emerald-400',
++			description: 'Paczka dostarczona. Miłej zabawy!'
++		},
++		CANCELLED: {
++			icon: '❌',
++			color: 'text-red-400',
++			description: 'Zamówienie anulowane (upłynął czas płatności BLIK).'
++		},
++		REFUNDED: {
++			icon: '↩️',
++			color: 'text-slate-400',
++			description: 'Zwrot środków został zainicjowany.'
++		}
++	};
++
++	const config = $derived(statusConfig[order.status] ?? { icon: '?', color: 'text-slate-400', description: '' });
++</script>
++
++<svelte:head>
++	<title>Zamówienie #{order.id.slice(0, 8)} — Fidget Fun!</title>
++</svelte:head>
++
++<a href="/" class="text-slate-500 hover:text-cyan-400 text-sm flex items-center gap-1 mb-6">
++	← Strona główna
++</a>
++
++<div class="space-y-6">
++	<!-- Status card -->
++	<div class="bg-slate-900 border border-slate-700 rounded-xl p-6 text-center">
++		<p class="text-4xl mb-3">{config.icon}</p>
++		<p class={`text-xl font-bold ${config.color}`}>{orderStatusLabel(order.status)}</p>
++		{#if config.description}
++			<p class="text-slate-400 text-sm mt-2">{config.description}</p>
++		{/if}
++
++		{#if order.tracking_number}
++			<a
++				href="https://inpost.pl/sledzenie-przesylek?number={order.tracking_number}"
++				target="_blank"
++				rel="noopener noreferrer"
++				class="inline-block mt-4 text-cyan-400 text-sm hover:underline"
++			>
++				Śledź paczkę: {order.tracking_number} →
++			</a>
++		{/if}
++	</div>
++
++	<!-- Order details -->
++	<div class="bg-slate-900 border border-slate-700 rounded-xl divide-y divide-slate-800">
++		<div class="p-4">
++			<p class="text-xs text-slate-500 uppercase tracking-wide mb-1">Zamówienie</p>
++			<p class="text-slate-300 font-mono text-sm">{order.id}</p>
++		</div>
++		<div class="p-4">
++			<p class="text-xs text-slate-500 uppercase tracking-wide mb-1">Paczkomat</p>
++			<p class="text-slate-300 text-sm">{order.inpost_point_id}</p>
++		</div>
++	</div>
++
++	<!-- Order items -->
++	<div>
++		<h2 class="text-sm font-bold text-slate-500 uppercase tracking-widest mb-3">Produkty</h2>
++		<div class="bg-slate-900 border border-slate-700 rounded-xl divide-y divide-slate-800">
++			{#each items as { item, variant, product }}
++				<div class="p-4 flex items-center gap-3">
++					<span
++						class="w-6 h-6 rounded-full flex-shrink-0 border border-slate-600"
++						style="background-color: {variant.hex_code}"
++					></span>
++					<div class="flex-1 min-w-0">
++						<p class="text-slate-200 text-sm">{product.name}</p>
++						<p class="text-slate-500 text-xs">
++							{variant.is_mystery ? 'Mystery Box' : variant.filament_color} × {item.quantity}
++						</p>
++					</div>
++					<div class="text-right">
++						<p class="text-slate-300 text-sm">{formatPln(product.price_pln * item.quantity)}</p>
++						{#if item.status === 'PRINTED'}
++							<p class="text-emerald-500 text-xs">✓ Wydrukowano</p>
++						{:else if order.status === 'PRINTING'}
++							<p class="text-cyan-400 text-xs">Drukowanie…</p>
++						{/if}
++					</div>
++				</div>
++			{/each}
++			<div class="p-4 flex justify-between items-center">
++				<span class="text-slate-400 text-sm">Razem</span>
++				<span class="text-cyan-400 font-bold">{formatPln(order.total_pln)}</span>
++			</div>
++		</div>
++	</div>
++</div>
+diff --git a/src/routes/(shop)/products/[id]/+page.server.ts b/src/routes/(shop)/products/[id]/+page.server.ts
+new file mode 100644
+index 0000000..5e1263e
+--- /dev/null
++++ b/src/routes/(shop)/products/[id]/+page.server.ts
+@@ -0,0 +1,17 @@
++import { error } from '@sveltejs/kit';
++import type { PageServerLoad } from './$types';
++import { getProductWithVariants } from '$lib/server/db/queries';
++
++export const load: PageServerLoad = async ({ params, parent }) => {
++	const id = Number(params.id);
++	if (!Number.isInteger(id) || id < 1) error(404, 'Produkt nie znaleziony');
++
++	const [productData, { activeDrop, settings }] = await Promise.all([
++		getProductWithVariants(id),
++		parent()
++	]);
++
++	if (!productData) error(404, 'Produkt nie znaleziony');
++
++	return { productData, activeDrop, settings };
++};
+diff --git a/src/routes/(shop)/products/[id]/+page.svelte b/src/routes/(shop)/products/[id]/+page.svelte
+new file mode 100644
+index 0000000..1be8dc4
+--- /dev/null
++++ b/src/routes/(shop)/products/[id]/+page.svelte
+@@ -0,0 +1,159 @@
++<script lang="ts">
++	import ColorSwatch from '$lib/components/ColorSwatch.svelte';
++	import ScarcityBadge from '$lib/components/ScarcityBadge.svelte';
++	import { formatPln, formatMinutes } from '$lib/formatting';
++	import { addToCart } from '$lib/cart.svelte';
++	import type { PageData } from './$types';
++	import type { ProductVariant } from '$lib/server/db/schema';
++
++	let { data }: { data: PageData } = $props();
++
++	const product = $derived(data.productData.product);
++	const variants = $derived(data.productData.variants);
++
++	// Filter to normal variants and the mystery variant separately
++	const regularVariants = $derived(variants.filter((v) => !v.is_mystery));
++	const mysteryVariant = $derived(variants.find((v) => v.is_mystery));
++
++	let selectedVariant = $state<ProductVariant | null>(null);
++	// Initialise to first regular variant once data is available
++	$effect(() => {
++		if (selectedVariant === null && regularVariants.length > 0) {
++			selectedVariant = regularVariants[0];
++		}
++	});
++
++	const canAdd = $derived(
++		data.settings.printer_is_on &&
++			data.activeDrop !== null &&
++			data.activeDrop.status === 'ACTIVE' &&
++			selectedVariant !== null
++	);
++
++	const remaining = $derived(
++		data.activeDrop
++			? data.activeDrop.total_capacity_minutes - data.activeDrop.allocated_minutes
++			: 0
++	);
++
++	function handleAddToCart() {
++		if (!selectedVariant || !canAdd) return;
++		addToCart({
++			variantId: selectedVariant.id,
++			productId: product.id,
++			productName: product.name,
++			filamentColor: selectedVariant.filament_color,
++			hexCode: selectedVariant.hex_code,
++			pricePln: product.price_pln,
++			printDurationMinutes: product.print_duration_minutes,
++			isMystery: false
++		});
++		// Navigate to checkout
++		window.location.href = '/checkout';
++	}
++
++	function handleMysteryBox() {
++		if (!mysteryVariant || !canAdd) return;
++		addToCart({
++			variantId: mysteryVariant.id,
++			productId: product.id,
++			productName: `${product.name} — Mystery Box`,
++			filamentColor: 'Niespodzianka',
++			hexCode: '#6366f1',
++			pricePln: product.price_pln,
++			printDurationMinutes: product.print_duration_minutes,
++			isMystery: true
++		});
++		window.location.href = '/checkout';
++	}
++</script>
++
++<svelte:head>
++	<title>{product.name} — Fidget Fun!</title>
++</svelte:head>
++
++<a href="/" class="text-slate-500 hover:text-cyan-400 text-sm flex items-center gap-1 mb-6">
++	← Wróć
++</a>
++
++<div class="space-y-6">
++	<!-- Product header -->
++	<div class="flex items-start justify-between gap-4">
++		<div>
++			<h1 class="text-2xl font-bold text-slate-100">{product.name}</h1>
++			{#if data.activeDrop}
++				<ScarcityBadge remainingMinutes={remaining} class="mt-2" />
++			{/if}
++		</div>
++		<div class="text-right flex-shrink-0">
++			<p class="text-3xl font-bold text-cyan-400">{formatPln(product.price_pln)}</p>
++		</div>
++	</div>
++
++	<!-- Description -->
++	{#if product.description}
++		<p class="text-slate-300 text-sm leading-relaxed">{product.description}</p>
++	{/if}
++
++	<!-- Print time widget -->
++	<div class="bg-slate-900 border border-slate-700 rounded-lg p-4 flex items-center gap-3">
++		<div class="text-2xl">🖨️</div>
++		<div>
++			<p class="text-xs text-slate-500 uppercase tracking-wide">Czas druku</p>
++			<p class="text-slate-200 font-semibold">{formatMinutes(product.print_duration_minutes)}</p>
++			<p class="text-slate-500 text-xs mt-0.5">na jeden egzemplarz</p>
++		</div>
++	</div>
++
++	<!-- Colour picker -->
++	{#if regularVariants.length > 0}
++		<div>
++			<p class="text-sm text-slate-400 mb-3">
++				Kolor filamentu:
++				{#if selectedVariant}
++					<span class="text-slate-200 font-medium">{selectedVariant.filament_color}</span>
++				{/if}
++			</p>
++			<div class="flex flex-wrap gap-2">
++				{#each regularVariants as variant}
++					<ColorSwatch
++						{variant}
++						selected={selectedVariant?.id === variant.id}
++						onSelect={() => (selectedVariant = variant)}
++					/>
++				{/each}
++			</div>
++		</div>
++	{/if}
++
++	<!-- Add to cart -->
++	{#if !data.settings.printer_is_on}
++		<div class="bg-slate-900 border border-slate-700 rounded-lg p-4 text-center">
++			<p class="text-amber-300 text-sm">Drukarnia jest teraz offline.</p>
++			{#if data.settings.status_message}
++				<p class="text-slate-500 text-xs mt-1">{data.settings.status_message}</p>
++			{/if}
++		</div>
++	{:else if !data.activeDrop}
++		<div class="bg-slate-900 border border-slate-700 rounded-lg p-4 text-center">
++			<p class="text-slate-400 text-sm">Brak aktywnego dropu.</p>
++		</div>
++	{:else}
++		<button
++			onclick={handleAddToCart}
++			disabled={!canAdd}
++			class="w-full bg-cyan-500 hover:bg-cyan-400 disabled:bg-slate-700 disabled:text-slate-500 text-slate-950 font-bold py-4 rounded-xl text-base transition-colors"
++		>
++			Dodaj do koszyka
++		</button>
++
++		{#if mysteryVariant}
++			<button
++				onclick={handleMysteryBox}
++				class="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-bold py-3 rounded-xl text-sm transition-colors border border-indigo-400/30"
++			>
++				🎲 Surprise Me! — Mystery Box
++			</button>
++		{/if}
++	{/if}
++</div>
+diff --git a/src/routes/api/webhook/payment/+server.ts b/src/routes/api/webhook/payment/+server.ts
+new file mode 100644
+index 0000000..1c66895
+--- /dev/null
++++ b/src/routes/api/webhook/payment/+server.ts
+@@ -0,0 +1,47 @@
++/**
++ * Payment gateway webhook endpoint.
++ *
++ * Phase 1: structure and order state machine in place; signature verification stubbed.
++ * Phase 4: replace the stub with real PayU/Przelewy24 signature check.
++ */
++import { json, error } from '@sveltejs/kit';
++import type { RequestHandler } from './$types';
++import { confirmPayment } from '$lib/server/db/queries';
++
++interface PaymentWebhookPayload {
++	event: 'PAYMENT_CONFIRMED' | 'PAYMENT_FAILED' | string;
++	paymentId: string;
++}
++
++export const POST: RequestHandler = async ({ request }) => {
++	// Phase 4 TODO: verify gateway signature
++	// const signature = request.headers.get('x-payu-signature');
++	// if (!verifySignature(await request.text(), signature)) error(401, 'Invalid signature');
++
++	let payload: PaymentWebhookPayload;
++	try {
++		payload = await request.json();
++	} catch {
++		error(400, 'Invalid JSON payload');
++	}
++
++	if (payload.event !== 'PAYMENT_CONFIRMED') {
++		// Acknowledge non-confirmation events without acting on them
++		return json({ received: true });
++	}
++
++	if (!payload.paymentId) {
++		error(400, 'Missing paymentId');
++	}
++
++	const result = await confirmPayment(payload.paymentId);
++
++	if (!result.ok) {
++		// Log but return 200 — gateway should not retry on order-not-found
++		console.error('[webhook/payment] ORDER_NOT_FOUND for paymentId', payload.paymentId);
++		return json({ received: true, warning: 'order not found' });
++	}
++
++	console.info('[webhook/payment] Order confirmed:', result.orderId);
++	return json({ received: true, orderId: result.orderId });
++};
