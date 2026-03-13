@@ -25,7 +25,8 @@
 		"db:verify": "tsx src/lib/server/db/verify.ts",
 		"db:create-drop": "tsx src/lib/server/db/create-test-drop.ts",
 		"doc": "find docs -name \"*.md\" -not -path \"*rules*\" -not -name \"*PLAN*\" -not -name \"*llm*\"",
-		"proj": ""
+		"doc-arch": "find src -name \"*.ts\" -not -name \"*test*\" | xargs ./summarize.ts -o architecture.md",
+		"doc-presentation": "find src -name \"*.svelte\"  | xargs ./summarize.ts -o presentation.md"
 	},
 	"devDependencies": {
 		"@eslint/compat": "^2.0.2",
