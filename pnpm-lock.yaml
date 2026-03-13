@@ -40,7 +40,7 @@ importers:
         specifier: ^4.1.11
         version: 4.2.1(vite@7.3.1(@types/node@22.19.15)(jiti@2.6.1)(lightningcss@1.31.1)(tsx@4.21.0))
       '@types/node':
-        specifier: ^22
+        specifier: ^22.19.15
         version: 22.19.15
       '@vitest/browser-playwright':
         specifier: ^4.1.0
@@ -72,6 +72,9 @@ importers:
       tailwindcss:
         specifier: ^4.1.11
         version: 4.2.1
+      tsx:
+        specifier: ^4.21.0
+        version: 4.21.0
       typescript:
         specifier: ^5.9.3
         version: 5.9.3
@@ -3448,7 +3451,6 @@ snapshots:
       get-tsconfig: 4.13.6
     optionalDependencies:
       fsevents: 2.3.3
-    optional: true
 
   type-check@0.4.0:
     dependencies:
