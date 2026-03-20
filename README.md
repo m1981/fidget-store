@@ -1,5 +1,7 @@
 # sv
 
+claude --resume 6ba9f617-b708-4f09-b180-4f07a2e9a495
+
 Everything you need to build a Svelte project, powered by [`sv`](https://github.com/sveltejs/cli).
 
 ## Creating a project
